@@ -1,0 +1,37 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: brandflow
+      POSTGRES_USER: brandflow
+      POSTGRES_PASSWORD: brandflow
+    ports: ["5432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  api:
+    build: ./apps/api
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://brandflow:brandflow@postgres:5432/brandflow
+    ports: ["8000:8000"]
+    depends_on: [postgres, redis]
+  worker:
+    build: ./apps/api
+    command: python worker.py
+    env_file: .env
+    depends_on: [api, redis]
+  scheduler:
+    build: ./apps/api
+    command: python scheduler.py
+    env_file: .env
+    depends_on: [api, redis]
+  web:
+    build: ./apps/web
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports: ["3000:3000"]
+    depends_on: [api]
+volumes:
+  postgres_data:
