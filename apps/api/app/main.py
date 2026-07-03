@@ -145,7 +145,12 @@ def public_action(token:str,data:ActionIn,db:Session=Depends(get_db)): ar=db.que
 @app.get('/brands/{id}/channel-accounts')
 def accounts(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.query(m.ChannelAccount).filter_by(brand_id=id).all()
 @app.post('/brands/{id}/connectors/{provider}/connect')
-def connect(id:int,provider:str,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): c=get_connector(provider); acc=m.ChannelAccount(brand_id=id,provider=provider,account_name=payload.get('account_name',provider),account_identifier=payload.get('account_identifier','mock'),capabilities_json=c.capabilities.__dict__,credentials_encrypted_json={'placeholder':True}); db.add(acc); db.commit(); return acc
+def connect(id:int,provider:str,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    c=get_connector(provider); creds=payload.get('credentials',payload); has_creds=bool(creds.get('token') or creds.get('api_key') or creds.get('consumer_key') or creds.get('service_account_json'))
+    assisted={'instagram','tiktok','linkedin','google_business'}; status='connected' if has_creds and provider not in assisted else ('requires_api_review' if has_creds and provider in assisted else ('mock' if DEMO_MODE and payload.get('mock') else 'needs_credentials'))
+    acc=db.query(m.ChannelAccount).filter_by(brand_id=id,provider=provider).first() or m.ChannelAccount(brand_id=id,provider=provider,account_name=payload.get('account_name',provider),account_identifier=payload.get('account_identifier','needs_credentials'))
+    acc.capabilities_json=c.capabilities.__dict__; acc.credentials_encrypted_json={k:('********' if 'secret' in k or 'token' in k else v) for k,v in creds.items()}; acc.connection_status=status
+    db.add(acc); db.commit(); return acc
 @app.get('/connectors/{provider}/callback')
 def cb(provider:str): return {'provider':provider,'status':'oauth_placeholder'}
 @app.post('/drafts/{id}/publish-now')
@@ -197,13 +202,13 @@ def reports(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return
 @app.post('/brands/{id}/reports/generate-weekly')
 def gen_report(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): rep=m.WeeklyReport(brand_id=id,week_start='2026-06-29',week_end='2026-07-05',summary='Mock weekly report: approvals and CTA-led posts improved performance.',insights_json=PerformanceAnalystAgent().run({'orders':1}),recommendations_json={'next_week':['More platform-native variants']}); db.add(rep); db.commit(); return rep
 @app.get('/brands/{id}/assets')
-def assets(id:int,u=Depends(user_from_auth)): return []
+def assets(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.query(m.Asset).filter_by(brand_id=id).all()
 @app.post('/brands/{id}/assets')
-def create_asset(id:int,payload:dict,u=Depends(user_from_auth)): return {'id':'asset_mock','brand_id':id,**payload}
+def create_asset(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): row=m.Asset(brand_id=id,name=payload.get('name','Untitled asset'),asset_type=payload.get('asset_type','metadata_only'),url=payload.get('url'),description=payload.get('description','Metadata-only placeholder asset'),tags_json=payload.get('tags',[]),metadata_json=payload); db.add(row); db.commit(); return row
 @app.patch('/assets/{id}')
-def patch_asset(id:str,payload:dict,u=Depends(user_from_auth)): return {'id':id,**payload}
+def patch_asset(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): row=db.get(m.Asset,id); [setattr(row,k,v) for k,v in payload.items() if hasattr(row,k)]; db.commit(); return row
 @app.delete('/assets/{id}')
-def del_asset(id:str,u=Depends(user_from_auth)): return {'deleted':id}
+def del_asset(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): row=db.get(m.Asset,id); db.delete(row); db.commit(); return {'deleted':id}
 @app.get('/brands/{id}/campaigns')
 def campaigns(id:int,u=Depends(user_from_auth)): return []
 @app.post('/brands/{id}/campaigns')
@@ -248,3 +253,82 @@ def patch_plan(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(
 def flags(u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.query(m.FeatureFlag).all()
 @app.patch('/admin/feature-flags/{id}')
 def patch_flag(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): f=db.get(m.FeatureFlag,id); [setattr(f,k,v) for k,v in payload.items() if hasattr(f,k)]; db.commit(); return f
+
+# --- Real Product + Light UI v4 additive endpoints ---
+import os
+DEMO_MODE = os.getenv('DEMO_MODE', 'true').lower() == 'true'
+
+@app.get('/environment')
+def environment(): return {'demo_mode': DEMO_MODE, 'mode': 'Demo mode' if DEMO_MODE else 'Production mode'}
+
+@app.get('/onboarding/status')
+def onboarding_status(u=Depends(user_from_auth), db:Session=Depends(get_db)):
+    brands=db.query(m.Brand).all(); brand=brands[0] if brands else None
+    return {'completed': bool(brand and brand.status=='active'), 'brand_id': brand.id if brand else None, 'steps': db.query(m.SetupChecklistItem).filter_by(brand_id=brand.id).all() if brand else []}
+
+@app.post('/onboarding/save-step')
+def onboarding_save_step(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org_data=payload.get('organization') or {}; brand_data=payload.get('brand') or {}; brand_id=payload.get('brand_id')
+    org=None; brand=db.get(m.Brand,brand_id) if brand_id else None
+    if org_data:
+        org=db.get(m.Organization,org_data.get('id')) if org_data.get('id') else None
+        if not org:
+            org=m.Organization(name=org_data.get('name','New organization'),slug=(org_data.get('name','new-organization').lower().replace(' ','-')),mode=org_data.get('mode','owner'),owner_user_id=u.id); db.add(org); db.flush(); db.add(m.OrganizationMember(organization_id=org.id,user_id=u.id,role='org_owner'))
+        else:
+            [setattr(org,k,v) for k,v in org_data.items() if hasattr(org,k)]
+    if brand_data:
+        if not org: org=db.query(m.Organization).filter_by(owner_user_id=u.id).first()
+        if not brand:
+            brand=m.Brand(organization_id=brand_data.get('organization_id') or (org.id if org else None),name=brand_data.get('name','New brand'),slug=brand_data.get('name','new-brand').lower().replace(' ','-'),industry=brand_data.get('industry','general'),country=brand_data.get('country','DE'),primary_language=brand_data.get('primary_language','en'),timezone=brand_data.get('timezone','UTC'),description=brand_data.get('description',''))
+            db.add(brand); db.flush()
+        else:
+            [setattr(brand,k,v) for k,v in brand_data.items() if hasattr(brand,k)]
+    db.commit(); return {'organization_id': org.id if org else None, 'brand_id': brand.id if brand else brand_id, 'saved': True}
+
+@app.post('/onboarding/complete')
+def onboarding_complete(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    saved=onboarding_save_step(payload,u,db); brand_id=saved.get('brand_id') or payload.get('brand_id')
+    brand=db.get(m.Brand,brand_id)
+    if not brand: raise HTTPException(400,'Brand is required')
+    dna=db.query(m.BrandDNA).filter_by(brand_id=brand.id).first() or m.BrandDNA(brand_id=brand.id); db.add(dna)
+    dna.voice_json=payload.get('voice',payload.get('brand_voice',{'tone':'clear'})); dna.channel_rules_json=payload.get('channel_rules',{}); dna.compliance_json=payload.get('approval_settings',{}); dna.cta_library_json={'items':payload.get('ctas',['Learn more'])}; dna.forbidden_words_json={'items':payload.get('forbidden_words',[])}
+    db.query(m.ProductService).filter_by(brand_id=brand.id).delete();
+    for ps in payload.get('products_services',payload.get('products',[])) or []: db.add(m.ProductService(brand_id=brand.id,type=ps.get('type','service'),name=ps.get('name','Offer'),description=ps.get('description',''),metadata_json=ps))
+    for provider in payload.get('channels',payload.get('channel_preferences',['instagram','linkedin'])): 
+        if not db.query(m.ChannelAccount).filter_by(brand_id=brand.id,provider=provider).first(): db.add(m.ChannelAccount(brand_id=brand.id,provider=provider,account_name=provider,account_identifier='needs_credentials',connection_status='needs_credentials',capabilities_json=get_connector(provider).capabilities.__dict__ if provider in [c['provider'] for c in connector_catalog()] else {},credentials_encrypted_json={}))
+    for name in payload.get('content_goals',payload.get('pillars',['Education','Proof','Offer'])):
+        if not db.query(m.ContentPillar).filter_by(brand_id=brand.id,name=str(name)).first(): db.add(m.ContentPillar(brand_id=brand.id,name=str(name),description='Onboarding content pillar'))
+    for key,label in [('profile','Brand profile'),('dna','Brand voice'),('channels','Channels'),('approval','Approvals')]:
+        row=db.query(m.SetupChecklistItem).filter_by(brand_id=brand.id,key=key).first() or m.SetupChecklistItem(brand_id=brand.id,key=key,label=label); row.status='done'; db.add(row)
+    brand.status='active'; db.commit(); return {'completed':True,'brand_id':brand.id}
+
+@app.get('/brands/{id}/setup-checklist')
+def setup_checklist(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.query(m.SetupChecklistItem).filter_by(brand_id=id).all()
+@app.patch('/brands/{id}/setup-checklist/{item_id}')
+def setup_checklist_patch(id:int,item_id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): row=db.get(m.SetupChecklistItem,item_id); [setattr(row,k,v) for k,v in payload.items() if hasattr(row,k)]; db.commit(); return row
+
+@app.get('/brands/{id}/dashboard')
+def dashboard(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    items=db.query(m.CalendarItem).filter_by(brand_id=id).all(); drafts=db.query(m.ContentDraft).filter_by(brand_id=id).all(); accounts=db.query(m.ChannelAccount).filter_by(brand_id=id).all(); approvals_list=db.query(m.ApprovalRequest).join(m.ContentDraft,m.ContentDraft.id==m.ApprovalRequest.draft_id).filter(m.ContentDraft.brand_id==id).all()
+    done=db.query(m.SetupChecklistItem).filter_by(brand_id=id,status='done').count(); total=max(db.query(m.SetupChecklistItem).filter_by(brand_id=id).count(),4)
+    return {'setup_completion':round(done/total*100),'next_best_action':'Generate this week' if not items else 'Review pending approvals','pipeline_counts':{s:len([d for d in drafts if d.status==s]) for s in ['draft_ready','in_approval','approved','rejected']},'today_tasks':items[:5],'secondary_metrics':{'drafts':len(drafts),'calendar_items':len(items),'approvals':len(approvals_list)},'approval_queue':approvals_list,'brand_memory_notes':db.query(m.BrandMemoryNote).filter_by(brand_id=id).all(),'connector_health':[{'provider':a.provider,'status':a.connection_status} for a in accounts],'weekly_insight':(db.query(m.WeeklyReport).filter_by(brand_id=id).first().summary if db.query(m.WeeklyReport).filter_by(brand_id=id).first() else 'No weekly report yet')}
+
+@app.post('/brands/{id}/drafts')
+def create_draft(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    d=m.ContentDraft(brand_id=id,calendar_item_id=payload.get('calendar_item_id'),channel=payload.get('channel','assisted'),content_type=payload.get('content_type','post'),language=payload.get('language','en'),title=payload.get('title','Untitled draft'),body=payload.get('body',''),created_by_user_id=u.id); db.add(d); db.flush(); v=m.ContentVersion(draft_id=d.id,version_number=1,title=d.title,body=d.body,created_by_user_id=u.id,ai_generated=False); db.add(v); db.flush(); d.current_version_id=v.id; db.commit(); return d
+@app.post('/drafts/{id}/versions')
+def create_version(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): d=db.get(m.ContentDraft,id); v=m.ContentVersion(draft_id=id,version_number=db.query(m.ContentVersion).filter_by(draft_id=id).count()+1,title=payload.get('title',d.title),body=payload.get('body',d.body),metadata_json=payload.get('metadata',{}),created_by_user_id=u.id,ai_generated=payload.get('ai_generated',False)); db.add(v); d.title=v.title; d.body=v.body; db.flush(); d.current_version_id=v.id; db.commit(); return v
+@app.get('/brands/{id}/approvals')
+def brand_approvals(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.query(m.ApprovalRequest).join(m.ContentDraft,m.ContentDraft.id==m.ApprovalRequest.draft_id).filter(m.ContentDraft.brand_id==id).all()
+
+@app.patch('/channel-accounts/{id}')
+def patch_account(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): acc=db.get(m.ChannelAccount,id); [setattr(acc,k,v) for k,v in payload.items() if hasattr(acc,k)]; db.commit(); return acc
+@app.post('/channel-accounts/{id}/test')
+def test_account(id:int,payload:dict={},u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    acc=db.get(m.ChannelAccount,id); creds={**(acc.credentials_encrypted_json or {}),**payload}; ok=bool(creds.get('token') or creds.get('api_key') or creds.get('consumer_key') or creds.get('service_account_json'))
+    acc.connection_status='connected' if ok else ('mock' if DEMO_MODE and (acc.credentials_encrypted_json or {}).get('mock') else 'needs_credentials'); acc.last_sync_at=datetime.now(timezone.utc) if ok else acc.last_sync_at; db.commit(); return {'ok':ok,'status':acc.connection_status,'message':'Credentials validated' if ok else 'Needs credentials'}
+@app.post('/channel-accounts/{id}/disconnect')
+def disconnect_account(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): acc=db.get(m.ChannelAccount,id); acc.connection_status='needs_credentials'; acc.credentials_encrypted_json={}; db.commit(); return acc
+
+@app.post('/brands/{id}/analytics/manual-entry')
+def manual_metric(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): row=m.ManualMetric(brand_id=id,metric_date=payload.get('metric_date',datetime.now(timezone.utc).date().isoformat()),metrics_json=payload.get('metrics',payload)); db.add(row); db.commit(); return row
