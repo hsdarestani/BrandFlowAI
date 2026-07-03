@@ -2,9 +2,9 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_DB: brandflow
-      POSTGRES_USER: brandflow
-      POSTGRES_PASSWORD: brandflow
+      POSTGRES_DB: smarbiz
+      POSTGRES_USER: smarbiz
+      POSTGRES_PASSWORD: smarbiz
     ports: ["5432:5432"]
     volumes: ["postgres_data:/var/lib/postgresql/data"]
   redis:
@@ -14,7 +14,7 @@ services:
     build: ./apps/api
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+psycopg://brandflow:brandflow@postgres:5432/brandflow
+      DATABASE_URL: postgresql+psycopg://smarbiz:smarbiz@postgres:5432/smarbiz
     ports: ["8000:8000"]
     depends_on: [postgres, redis]
   worker:

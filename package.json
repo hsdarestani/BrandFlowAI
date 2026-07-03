@@ -1,1 +1,1 @@
-{"name":"brandflow-ai","private":true,"workspaces":["apps/web","packages/*"],"scripts":{"web:dev":"npm --workspace apps/web run dev","web:build":"npm --workspace apps/web run build"}}
+{"name":"smarbiz","private":true,"workspaces":["apps/web","packages/*"],"scripts":{"web:dev":"npm --workspace apps/web run dev","web:build":"npm --workspace apps/web run build"}}

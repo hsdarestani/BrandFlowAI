@@ -12,9 +12,9 @@ from .services.ai.agents import BrandAnalystAgent, ContentStrategistAgent, Copyw
 from .services.connectors.providers import get_connector, connector_catalog
 from .services.connectors.bale_safir import normalize_iran_phone
 Base.metadata.create_all(bind=engine)
-app=FastAPI(title='BrandFlow AI API', version='0.1.0')
+app=FastAPI(title='Smarbiz API', version='0.1.0')
 app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:3000'], allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
-class Signup(BaseModel): email:str; password:str; name:str='BrandFlow User'; locale:str='en'
+class Signup(BaseModel): email:str; password:str; name:str='Smarbiz User'; locale:str='en'; organization_name:str='Smarbiz Workspace'; preferred_language:str|None=None
 class Login(BaseModel): email:str; password:str
 class OrgIn(BaseModel): name:str; mode:str='owner'
 class BrandIn(BaseModel): organization_id:int; name:str; industry:str='general'; country:str='DE'; primary_language:str='en'; timezone:str='UTC'; description:str=''
@@ -29,12 +29,25 @@ def user_from_auth(authorization:str|None=Header(default=None), db:Session=Depen
     if not u: raise HTTPException(401,'Unknown user')
     return u
 @app.get('/health')
-def health(): return {'ok':True,'service':'brandflow-ai'}
+def health(): return {'ok':True,'service':'smarbiz'}
 @app.post('/auth/signup')
 def signup(data:Signup, db:Session=Depends(get_db)):
-    if db.query(m.User).filter_by(email=data.email).first(): raise HTTPException(409,'Email exists')
-    u=m.User(email=data.email,password_hash=hash_password(data.password),name=data.name,locale=data.locale,is_super_admin=data.email.startswith('admin@'))
-    db.add(u); db.commit(); return {'access_token':create_token(u.email),'user':{'id':u.id,'email':u.email,'is_super_admin':u.is_super_admin}}
+    email=data.email.strip().lower()
+    if len(data.password)<8: raise HTTPException(422,'Password must be at least 8 characters')
+    if db.query(m.User).filter_by(email=email).first(): raise HTTPException(409,'Email exists')
+    locale=(data.preferred_language or data.locale or 'en')
+    u=m.User(email=email,password_hash=hash_password(data.password),name=data.name.strip() or 'Smarbiz User',locale=locale,is_super_admin=email.startswith('admin@'))
+    db.add(u); db.flush()
+    org_name=(data.organization_name or f"{u.name}'s workspace").strip()
+    org=m.Organization(name=org_name,slug=org_name.lower().replace(' ','-'),mode='owner',owner_user_id=u.id)
+    db.add(org); db.flush()
+    db.add(m.OrganizationMember(organization_id=org.id,user_id=u.id,role='org_owner'))
+    brand=m.Brand(organization_id=org.id,name=org_name,slug=org.slug+'-brand',industry='general',country='DE',primary_language=locale,timezone='UTC',description='Created during Smarbiz signup',status='onboarding')
+    db.add(brand); db.flush()
+    for key,label in [('brand','Create brand'),('voice','Set voice'),('channels','Choose channels'),('approval','Approval path'),('first_week','First week')]:
+        db.add(m.SetupChecklistItem(brand_id=brand.id,key=key,label=label,status='pending'))
+    db.commit()
+    return {'access_token':create_token(u.email),'user':{'id':u.id,'email':u.email,'name':u.name,'is_super_admin':u.is_super_admin},'organization':{'id':org.id,'name':org.name},'brand':{'id':brand.id,'name':brand.name}}
 @app.post('/auth/login')
 def login(data:Login, db:Session=Depends(get_db)):
     u=db.query(m.User).filter_by(email=data.email).first()
