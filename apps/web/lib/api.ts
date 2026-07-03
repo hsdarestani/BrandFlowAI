@@ -1,6 +1,6 @@
 export type ApiOptions = RequestInit & { mockFallback?: unknown };
 const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-function token(){ if (typeof window === 'undefined') return ''; return localStorage.getItem('brandflow_token') || ''; }
+function token(){ if (typeof window === 'undefined') return ''; return localStorage.getItem('smarbiz_token') || ''; }
 async function request<T>(path:string, options:ApiOptions={}){
   try{
     const res=await fetch(`${baseUrl}${path}`,{...options,headers:{'Content-Type':'application/json',...(token()?{Authorization:`Bearer ${token()}`}:{ }),...(options.headers||{})}});

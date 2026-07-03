@@ -1,11 +1,11 @@
-# BrandFlow AI
+# Smarbiz
 
-BrandFlow AI is a multilingual AI Content Operations Platform: **your brand’s AI content manager**. It plans, generates, approves, publishes, analyzes, and learns across English, Persian/Farsi RTL, and German.
+Smarbiz is a multilingual AI Content Operations Platform: **your brand’s AI content manager**. It plans, generates, approves, publishes, analyzes, and learns across English, Persian/Farsi RTL, and German.
 
 ## Architecture
 
 - `apps/api`: FastAPI, SQLAlchemy 2.x models, JWT auth, RBAC, AI agents, connector architecture, approval workflow, analytics/report endpoints.
-- `apps/web`: Next.js App Router, TypeScript, Tailwind, dark SaaS UI, locale routes for `en`, `de`, and `fa` with true RTL via `dir="rtl"`.
+- `apps/web`: Next.js App Router, TypeScript, Tailwind, Smarbiz Pulse light SaaS UI, locale routes for `en`, `de`, and `fa` with true RTL via `dir="rtl"`.
 - `infra`: reserved for production deployment assets.
 - PostgreSQL + pgvector image, Redis, worker placeholder, scheduler placeholder in Docker Compose.
 
@@ -39,7 +39,7 @@ Demo accounts use password `password123`:
 
 | Email | Role |
 |---|---|
-| `admin@brandflow.ai` | super_admin |
+| `admin@smarbiz.sbs` | super_admin |
 | `owner@demo.com` | org_owner |
 | `client@demo.com` | client_approver |
 

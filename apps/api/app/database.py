@@ -3,7 +3,7 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    database_url: str = "sqlite:///./brandflow.db"
+    database_url: str = "sqlite:///./smarbiz.db"
     jwt_secret: str = "dev-change-me"
     ai_provider: str = "mock"
     bale_base_url: str = "https://tapi.bale.ai/bot{token}/{method}"

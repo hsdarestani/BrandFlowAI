@@ -1,2 +1,2 @@
 JOBS=['generate_brand_dna','generate_weekly_calendar','generate_content_drafts','run_compliance_check','send_approval_notification','publish_scheduled_post','fetch_post_analytics','generate_weekly_report','update_brand_memory','process_uploaded_asset','sync_woocommerce_products','sync_ga4_metrics','telegram_send','telegram_poll_updates','bale_send','bale_poll_updates','bale_safir_send','connector_health_check']
-if __name__=='__main__': print('BrandFlow worker placeholder ready for jobs:', ', '.join(JOBS))
+if __name__=='__main__': print('Smarbiz worker placeholder ready for jobs:', ', '.join(JOBS))

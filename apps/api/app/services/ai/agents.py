@@ -14,7 +14,7 @@ class ContentStrategistAgent:
 class CopywriterAgent:
     def run(self,item,brand_dna,channel='instagram',language='en'):
         body={'fa':'این پست با لحن گرم برند شما نوشته شده است. برای سفارش پیام بدهید.','de':'Sachlicher, regelkonformer Beitrag mit klarem Nutzen und vorsichtigem Leistungsversprechen.','en':'A clear, benefit-led post that matches your brand voice and invites the next step.'}.get(language)
-        return {'title':item.title,'body':body,'hashtags':['#BrandFlowAI','#ContentOps',f'#{channel}'],'brand_fit_score':.88,'compliance_score':.91}
+        return {'title':item.title,'body':body,'hashtags':['#SmarbizAI','#ContentOps',f'#{channel}'],'brand_fit_score':.88,'compliance_score':.91}
 class ComplianceReviewerAgent:
     def run(self,draft,industry='general',language='en',rules=None): return {'risk_score':.12,'warnings':['Avoid guaranteed outcomes'] if industry in ['medical','finance','legal','beauty'] else [],'safer_rewrite':draft.body}
 class ApprovalLearningAgent:
