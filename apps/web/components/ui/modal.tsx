@@ -1,0 +1,2 @@
+'use client';
+export function Modal({open,onClose,title,children}:{open:boolean;onClose:()=>void;title:string;children:React.ReactNode}){if(!open)return null;return <div className="fixed inset-0 z-40 grid place-items-center bg-black/70 p-4" onClick={onClose}><div className="card max-h-[90vh] w-full max-w-2xl overflow-auto" onClick={e=>e.stopPropagation()}><div className="mb-4 flex items-center justify-between"><h2 className="text-2xl font-black">{title}</h2><button className="icon" onClick={onClose}>✕</button></div>{children}</div></div>}
