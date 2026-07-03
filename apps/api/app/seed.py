@@ -4,6 +4,12 @@ from .security import hash_password
 from .services.connectors.providers import get_connector
 Base.metadata.create_all(bind=engine)
 db=SessionLocal()
+
+# Idempotent demo seed: clear demo-owned data before recreating the deterministic demo workspace.
+# This avoids duplicate slugs/tokens while keeping the script safe to run repeatedly in dev.
+for table in reversed(Base.metadata.sorted_tables):
+    db.execute(table.delete())
+db.commit()
 def user(email,name,super=False):
     u=db.query(User).filter_by(email=email).first() or User(email=email,name=name,password_hash=hash_password('password123'),is_super_admin=super,locale='en')
     db.add(u); db.flush(); return u
