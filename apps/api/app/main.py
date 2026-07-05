@@ -20,7 +20,8 @@ class Signup(BaseModel): email:str; password:str; name:str='Smarbiz User'; local
 class Login(BaseModel): email:str; password:str
 class OrgIn(BaseModel): name:str; mode:str='owner'
 class BrandIn(BaseModel): organization_id:int; name:str; industry:str='general'; country:str='DE'; primary_language:str='en'; timezone:str='UTC'; description:str=''
-class ActionIn(BaseModel): action:str; comment:str|None=None; revision_prompt:str|None=None; save_to_memory:bool=True
+class ActionIn(BaseModel): action:str='approve'; comment:str|None=None; revision_prompt:str|None=None; save_to_memory:bool=True; reviewer_name:str|None=None
+class ApprovalCreate(BaseModel): draft_id:int|None=None; title:str|None=None; reviewer_name:str|None=None; reviewer_email:str|None=None; reviewer_phone:str|None=None; message:str|None=None; due_at:str|None=None; method:str='public_link'
 class DraftPatch(BaseModel): title:str|None=None; body:str|None=None; status:str|None=None
 class CalendarItemIn(BaseModel):
     brand_id:int|None=None; campaign_id:int|None=None; title:str=Field(min_length=1); description:str=''
@@ -153,6 +154,14 @@ def build_home_overview(db:Session,u):
 
 def make_unique_org_slug(db, org_name:str):
     base='-'.join((org_name or 'smarbiz-workspace').lower().split()) or 'smarbiz-workspace'
+    slug=base; i=2
+    while db.query(m.Organization).filter_by(slug=slug).first():
+        slug=f'{base}-{i}'; i+=1
+    return slug
+
+
+def make_unique_org_slug(db, name:str):
+    base='-'.join((name or 'smarbiz-workspace').strip().lower().split()) or 'smarbiz-workspace'
     slug=base; i=2
     while db.query(m.Organization).filter_by(slug=slug).first():
         slug=f'{base}-{i}'; i+=1
@@ -346,26 +355,112 @@ def translate(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(g
 def compliance(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): d=db.get(m.ContentDraft,id); return {'risk_score':float(d.compliance_score),'warnings':[]}
 @app.get('/drafts/{id}/versions')
 def versions(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.query(m.ContentVersion).filter_by(draft_id=id).all()
+def _member_org_ids(db,u):
+    return [x.organization_id for x in db.query(m.OrganizationMember).filter_by(user_id=u.id,status='active').all()] or [x.id for x in db.query(m.Organization).filter_by(owner_user_id=u.id).all()]
+def _tenant_brand(db,u,brand_id=None):
+    q=db.query(m.Brand).filter(m.Brand.organization_id.in_(_member_org_ids(db,u)))
+    if brand_id: q=q.filter(m.Brand.id==brand_id)
+    return q.order_by(m.Brand.id).first()
+def _draft_for_user(db,u,draft_id):
+    d=db.get(m.ContentDraft,draft_id)
+    b=db.get(m.Brand,d.brand_id) if d else None
+    if not d or not b or b.organization_id not in _member_org_ids(db,u): raise HTTPException(404,{'error':'not_found','message':'Draft not found'})
+    return d
+
+def _approval_q(db,u):
+    return db.query(m.ApprovalRequest).join(m.ContentDraft,m.ContentDraft.id==m.ApprovalRequest.draft_id).join(m.Brand,m.Brand.id==m.ContentDraft.brand_id).filter(m.Brand.organization_id.in_(_member_org_ids(db,u)))
+def _approval_for_user(db,u,id):
+    ar=_approval_q(db,u).filter(m.ApprovalRequest.id==id).first()
+    if not ar: raise HTTPException(404,{'error':'not_found','message':'Approval request not found'})
+    return ar
+
+def _public_url(token): return f'/public/approval/{token}'
+def _draft_json(d):
+    return {'id':d.id,'title':d.title,'body':d.body,'hook':None,'cta':None,'hashtags':' '.join(d.hashtags_json or []),'status':d.status,'quality_score':float(d.brand_fit_score or 0),'warnings':[]}
+def _summary(ar,db):
+    d=db.get(m.ContentDraft,ar.draft_id)
+    return {'id':ar.id,'title':d.title if d else f'Approval #{ar.id}','channel':d.channel if d else None,'content_type':d.content_type if d else None,'status':ar.status,'reviewer':None,'due_at':ar.expires_at.isoformat() if ar.expires_at else None,'updated_at':ar.updated_at.isoformat() if ar.updated_at else None,'href':f'/app/approvals?request={ar.id}'}
+def _detail(ar,db,token=None):
+    d=db.get(m.ContentDraft,ar.draft_id); item=db.get(m.CalendarItem,d.calendar_item_id) if d and d.calendar_item_id else None
+    stored=db.query(m.ApprovalAction).filter_by(approval_request_id=ar.id,action='created').filter(m.ApprovalAction.source_message_id != None).first(); token=token or (stored.source_message_id if stored else None)
+    out=_summary(ar,db); out.update({'draft':_draft_json(d) if d else None,'calendar_item':({'id':item.id,'scheduled_at':item.scheduled_at.isoformat() if item.scheduled_at else None} if item else None),'public_url':_public_url(token) if token else None,'message':None,'actions':[{'id':a.id,'action':a.action,'actor_name':None,'comment':a.comment,'created_at':a.created_at.isoformat() if a.created_at else ''} for a in db.query(m.ApprovalAction).filter_by(approval_request_id=ar.id).order_by(m.ApprovalAction.created_at.desc()).all()]})
+    return out
+
+def _set_draft_status(db,ar,status):
+    d=db.get(m.ContentDraft,ar.draft_id)
+    if d: d.status=status
+
+def _decide(db,ar,action,comment,user_id=None,source='in_app',reviewer_name=None):
+    if ar.status in ['approved','rejected','cancelled','expired']: raise HTTPException(409,{'error':'closed','message':'Approval request is already closed'})
+    if action in ['rejected','changes_requested'] and not (comment or '').strip(): raise HTTPException(422,{'error':'comment_required','message':'Comment is required'})
+    ar.status=action; ar.updated_at=datetime.now(timezone.utc); ar.expires_at=ar.expires_at
+    _set_draft_status(db,ar, {'approved':'approved','changes_requested':'changes_requested','rejected':'rejected'}.get(action,'draft_ready'))
+    db.add(m.ApprovalAction(approval_request_id=ar.id,user_id=user_id,action=action,comment=comment,source_channel=source,save_to_memory=False)); db.commit(); return _detail(ar,db)
+
 @app.post('/drafts/{id}/approval-requests')
-def approval_req(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): tok=token_urlsafe(24); ar=m.ApprovalRequest(draft_id=id,requested_by_user_id=u.id,public_token_hash=sha256(tok.encode()).hexdigest()); db.add(ar); db.commit(); return {'id':ar.id,'public_url':f'/public/approval/{tok}','token':tok}
+def approval_req(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    d=_draft_for_user(db,u,id); tok=token_urlsafe(32); ar=m.ApprovalRequest(draft_id=id,requested_by_user_id=u.id,public_token_hash=sha256(tok.encode()).hexdigest(),status='pending'); d.status='in_approval'; db.add(ar); db.flush(); db.add(m.ApprovalAction(approval_request_id=ar.id,user_id=u.id,action='created',source_channel='in_app',source_message_id=tok,save_to_memory=False)); db.commit(); return {'id':ar.id,'public_url':_public_url(tok),'token':tok}
+@app.get('/approvals/overview')
+def approvals_overview(u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    brand=_tenant_brand(db,u); org=db.get(m.Organization,brand.organization_id) if brand else None; reqs=_approval_q(db,u).order_by(m.ApprovalRequest.updated_at.desc()).all(); drafts=db.query(m.ContentDraft).filter_by(brand_id=brand.id).count() if brand else 0
+    counts={k:len([r for r in reqs if r.status==k]) for k in ['pending','approved','changes_requested','rejected']}; decided=counts['approved']+counts['rejected']; chans={'telegram_connected':False,'bale_connected':False,'public_link_enabled':True}
+    if brand:
+        accs=db.query(m.ChannelAccount).filter_by(brand_id=brand.id).all(); chans.update({'telegram_connected':any(a.provider=='telegram' and a.connection_status=='connected' for a in accs),'bale_connected':any(a.provider in ['bale','bale_safir'] and a.connection_status=='connected' for a in accs)})
+    rec={'title':'Create a draft in Studio' if drafts==0 else ('Send first draft for approval' if not reqs else ('Create revisions' if counts['changes_requested'] else ('Review pending approvals' if counts['pending'] else 'Schedule approved content'))),'description':'Next best step for your approval workflow.','action_label':'Open Studio' if drafts==0 else 'Create approval request','action_type':'navigate' if drafts==0 else 'open_modal','action_href':'/app/content-studio','severity':'warning' if not (chans['telegram_connected'] or chans['bale_connected'] or chans['public_link_enabled']) else 'info'}
+    alerts=[]
+    if counts['pending']: alerts.append({'id':'pending','title':'Pending approvals','description':f"{counts['pending']} approval request(s) need a decision.",'severity':'info','href':'/app/approvals'})
+    if counts['changes_requested']: alerts.append({'id':'changes','title':'Changes requested','description':'Create revisions for reviewed content.','severity':'warning','href':'/app/approvals'})
+    return {'user':{'id':u.id,'name':u.name,'email':u.email},'organization':({'id':org.id,'name':org.name} if org else None),'brand':({'id':brand.id,'name':brand.name,'primary_language':brand.primary_language} if brand else None),'summary':{**{f'{k}_count':v for k,v in counts.items()},'overdue_count':0,'approval_rate':(round(counts['approved']/decided*100) if decided else None)},'requests':[_summary(r,db) for r in reqs],'selected_request':_detail(reqs[0],db) if reqs else None,'recommended_action':rec,'alerts':alerts,'channels':chans}
+@app.get('/approvals/requests')
+def approvals_requests(u=Depends(user_from_auth),db:Session=Depends(get_db)): return [_summary(r,db) for r in _approval_q(db,u).order_by(m.ApprovalRequest.updated_at.desc()).all()]
+@app.get('/approvals/requests/{id}')
+def approval_detail(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return _detail(_approval_for_user(db,u,id),db)
+@app.post('/approvals/requests')
+def create_approval(data:ApprovalCreate,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    if not data.draft_id: raise HTTPException(422,{'error':'draft_required','message':'Select a draft'})
+    d=_draft_for_user(db,u,data.draft_id); tok=token_urlsafe(32); ar=m.ApprovalRequest(draft_id=d.id,requested_by_user_id=u.id,public_token_hash=sha256(tok.encode()).hexdigest(),status='pending'); d.status='in_approval'; db.add(ar); db.flush(); db.add(m.ApprovalAction(approval_request_id=ar.id,user_id=u.id,action='created',comment=data.message,source_channel=data.method,source_message_id=tok,save_to_memory=False)); db.commit(); return _detail(ar,db,tok)
+@app.patch('/approvals/requests/{id}')
+def patch_approval(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): ar=_approval_for_user(db,u,id); ar.status=payload.get('status',ar.status); db.commit(); return _detail(ar,db)
+@app.post('/approvals/requests/{id}/approve')
+def approve_new(id:int,data:ActionIn=ActionIn(),u=Depends(user_from_auth),db:Session=Depends(get_db)): return _decide(db,_approval_for_user(db,u,id),'approved',data.comment,u.id)
+@app.post('/approvals/requests/{id}/request-changes')
+def changes_new(id:int,data:ActionIn,u=Depends(user_from_auth),db:Session=Depends(get_db)): return _decide(db,_approval_for_user(db,u,id),'changes_requested',data.comment,u.id)
+@app.post('/approvals/requests/{id}/reject')
+def reject_new(id:int,data:ActionIn,u=Depends(user_from_auth),db:Session=Depends(get_db)): return _decide(db,_approval_for_user(db,u,id),'rejected',data.comment,u.id)
+@app.post('/approvals/requests/{id}/save-feedback-to-memory')
+def save_feedback(id:int,data:ActionIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    ar=_approval_for_user(db,u,id); d=db.get(m.ContentDraft,ar.draft_id); text=(data.comment or '').strip() or (db.query(m.ApprovalAction).filter_by(approval_request_id=id).order_by(m.ApprovalAction.created_at.desc()).first() or m.ApprovalAction(comment='')).comment
+    if not text: raise HTTPException(422,{'error':'feedback_required','message':'Add feedback before saving to memory'})
+    note=m.BrandMemoryNote(brand_id=d.brand_id,note=text,source_type='approval_feedback',source_id=str(id),accepted_by_user_id=u.id,auto_generated=False); db.add(note); db.add(m.ApprovalAction(approval_request_id=id,user_id=u.id,action='saved_to_memory',comment=text,source_channel='in_app',save_to_memory=False)); db.commit(); return {'saved':True,'memory_note_id':note.id}
+@app.post('/approvals/requests/{id}/copy-link-event')
+def copy_link(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    ar=_approval_for_user(db,u,id); created=db.query(m.ApprovalAction).filter_by(approval_request_id=id,action='created').filter(m.ApprovalAction.source_message_id != None).first(); db.add(m.ApprovalAction(approval_request_id=id,user_id=u.id,action='copied_link',source_channel='in_app',save_to_memory=False)); db.commit(); return {'copied':True,'public_url':_public_url(created.source_message_id) if created else None}
+def _send_channel(id,u,db,provider):
+    ar=_approval_for_user(db,u,id); d=db.get(m.ContentDraft,ar.draft_id); acc=db.query(m.ChannelAccount).filter_by(brand_id=d.brand_id,provider=provider,connection_status='connected').first()
+    if not acc: raise HTTPException(422,{'error':'not_connected','message':f'{provider.title()} is not connected yet','href':'/app/integrations'})
+    db.add(m.ApprovalAction(approval_request_id=id,user_id=u.id,action='sent',comment=f'sent via {provider}',source_channel=provider,save_to_memory=False)); db.commit(); return {'sent':True,'channel':provider}
+@app.post('/approvals/requests/{id}/send-via-telegram')
+def send_telegram_new(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return _send_channel(id,u,db,'telegram')
+@app.post('/approvals/requests/{id}/send-via-bale')
+def send_bale_new(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return _send_channel(id,u,db,'bale')
 @app.get('/approvals')
-def approvals(u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.query(m.ApprovalRequest).all()
+def approvals(u=Depends(user_from_auth),db:Session=Depends(get_db)): return approvals_requests(u,db)
 @app.get('/approvals/{id}')
-def approval(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.get(m.ApprovalRequest,id)
-def do_action(ar, data, db, user_id=None, source='in_app'):
-    ar.status={'approve':'approved','reject':'rejected','request_changes':'changes_requested'}.get(data.action,data.action); aa=m.ApprovalAction(approval_request_id=ar.id,user_id=user_id,action=data.action,comment=data.comment,revision_prompt=data.revision_prompt,save_to_memory=data.save_to_memory,source_channel=source); db.add(aa); db.flush();
-    if data.save_to_memory: db.add(m.BrandMemoryNote(brand_id=db.get(m.ContentDraft,ar.draft_id).brand_id,note=ApprovalLearningAgent().run(aa)['note'],source_type='approval',source_id=str(aa.id)))
-    db.commit(); return {'status':ar.status}
-@app.post('/approvals/{id}/approve')
-def approve(id:int,data:ActionIn=ActionIn(action='approve'),u=Depends(user_from_auth),db:Session=Depends(get_db)): return do_action(db.get(m.ApprovalRequest,id),ActionIn(action='approve',comment=data.comment),db,u.id)
-@app.post('/approvals/{id}/reject')
-def reject(id:int,data:ActionIn,u=Depends(user_from_auth),db:Session=Depends(get_db)): data.action='reject'; return do_action(db.get(m.ApprovalRequest,id),data,db,u.id)
-@app.post('/approvals/{id}/request-changes')
-def req_changes(id:int,data:ActionIn,u=Depends(user_from_auth),db:Session=Depends(get_db)): data.action='request_changes'; return do_action(db.get(m.ApprovalRequest,id),data,db,u.id)
+def approval(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return approval_detail(id,u,db)
 @app.get('/public/approval/{token}')
-def public_approval(token:str,db:Session=Depends(get_db)): ar=db.query(m.ApprovalRequest).filter_by(public_token_hash=sha256(token.encode()).hexdigest()).first(); d=db.get(m.ContentDraft,ar.draft_id) if ar else None; return {'approval':ar,'draft':d}
+def public_approval(token:str,db:Session=Depends(get_db)):
+    ar=db.query(m.ApprovalRequest).filter_by(public_token_hash=sha256(token.encode()).hexdigest()).first()
+    if not ar: raise HTTPException(404,{'error':'invalid_token','message':'Approval link is invalid'})
+    return {'approval':_detail(ar,db),'closed':ar.status in ['approved','rejected','cancelled','expired']}
+@app.post('/public/approval/{token}/decision')
+def public_decision(token:str,data:ActionIn,db:Session=Depends(get_db)):
+    ar=db.query(m.ApprovalRequest).filter_by(public_token_hash=sha256(token.encode()).hexdigest()).first()
+    if not ar: raise HTTPException(404,{'error':'invalid_token','message':'Approval link is invalid'})
+    action={'approve':'approved','approved':'approved','request_changes':'changes_requested','changes_requested':'changes_requested','reject':'rejected','rejected':'rejected'}.get(data.action)
+    if not action: raise HTTPException(422,{'error':'invalid_action','message':'Use approve, request_changes, or reject'})
+    return _decide(db,ar,action,data.comment,None,'public_link',data.reviewer_name)
 @app.post('/public/approval/{token}/action')
-def public_action(token:str,data:ActionIn,db:Session=Depends(get_db)): ar=db.query(m.ApprovalRequest).filter_by(public_token_hash=sha256(token.encode()).hexdigest()).first(); return do_action(ar,data,db,None,'public_link')
+def public_action(token:str,data:ActionIn,db:Session=Depends(get_db)): return public_decision(token,data,db)
 @app.get('/brands/{id}/channel-accounts')
 def accounts(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.query(m.ChannelAccount).filter_by(brand_id=id).all()
 @app.post('/brands/{id}/connectors/{provider}/connect')
