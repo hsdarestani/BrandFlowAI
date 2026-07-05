@@ -1,10 +1,10 @@
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from secrets import token_urlsafe
 from hashlib import sha256
 from datetime import datetime, timezone, timedelta
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from .database import Base, engine, get_db
 from . import models as m
 from .security import hash_password, verify_password, create_token, decode_token
@@ -14,17 +14,55 @@ from .services.connectors.bale_safir import normalize_iran_phone
 import os, re
 Base.metadata.create_all(bind=engine)
 app=FastAPI(title='Smarbiz API', version='0.1.0')
-
-_default_origins='http://localhost:3000,https://smarbiz.sbs,https://www.smarbiz.sbs'
-CORS_ORIGINS=[o.strip() for o in os.getenv('CORS_ORIGINS', _default_origins).split(',') if o.strip()]
-DEMO_MODE=os.getenv('DEMO_MODE','false').lower() in {'1','true','yes'}
-app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
+cors_origins=[o.strip() for o in os.getenv('CORS_ORIGINS','http://localhost:3000,https://smarbiz.sbs,https://www.smarbiz.sbs').split(',') if o.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
 class Signup(BaseModel): email:str; password:str; name:str='Smarbiz User'; locale:str='en'; organization_name:str='Smarbiz Workspace'; preferred_language:str|None=None
 class Login(BaseModel): email:str; password:str
 class OrgIn(BaseModel): name:str; mode:str='owner'
 class BrandIn(BaseModel): organization_id:int; name:str; industry:str='general'; country:str='DE'; primary_language:str='en'; timezone:str='UTC'; description:str=''
 class ActionIn(BaseModel): action:str; comment:str|None=None; revision_prompt:str|None=None; save_to_memory:bool=True
 class DraftPatch(BaseModel): title:str|None=None; body:str|None=None; status:str|None=None
+class CalendarItemIn(BaseModel):
+    brand_id:int|None=None; campaign_id:int|None=None; title:str=Field(min_length=1); description:str=''
+    channel:str='instagram'; content_type:str='post'; status:str='idea'; scheduled_at:datetime|None=None; timezone:str|None=None; owner_user_id:int|None=None
+class CalendarGenerateIn(BaseModel): brand_id:int|None=None; week_start:datetime|None=None; channels:list[str]|None=None; campaign_id:int|None=None
+
+def slugify(value:str):
+    slug=re.sub(r'[^a-z0-9]+','-',value.lower()).strip('-')
+    return slug or 'workspace'
+def make_unique_org_slug(db:Session, org_name:str):
+    base=slugify(org_name); slug=base; i=2
+    while db.query(m.Organization).filter_by(slug=slug).first(): slug=f'{base}-{i}'; i+=1
+    return slug
+def user_org_ids(db:Session,u):
+    return [x.organization_id for x in db.query(m.OrganizationMember).filter_by(user_id=u.id,status='active').all()] or [x.id for x in db.query(m.Organization).filter_by(owner_user_id=u.id).all()]
+def user_brands(db:Session,u):
+    ids=user_org_ids(db,u)
+    return db.query(m.Brand).filter(m.Brand.organization_id.in_(ids)).all() if ids else []
+def require_brand(db:Session,u,brand_id:int|None=None):
+    brands=user_brands(db,u)
+    if not brands: return None
+    b=next((x for x in brands if x.id==brand_id),None) if brand_id else brands[0]
+    if brand_id and not b: raise HTTPException(403,'Brand is outside your workspace')
+    return b
+def parse_dt(value):
+    if not value: return None
+    if isinstance(value, datetime): return value
+    return datetime.fromisoformat(str(value).replace('Z','+00:00'))
+def item_channel(item): return (item.channels_json or ['other'])[0]
+def calendar_item_out(item, db:Session):
+    owner=db.get(m.User,item.assigned_user_id or item.created_by_user_id) if (item.assigned_user_id or item.created_by_user_id) else None
+    return {'id':item.id,'title':item.title,'description':item.description,'channel':item_channel(item),'content_type':item.content_type,'status':normalize_status(item.status),'scheduled_at':item.scheduled_at.isoformat() if item.scheduled_at else None,'owner':({'id':owner.id,'name':owner.name} if owner else None),'campaign':None,'quality_score':None,'warning_count':1 if float(item.risk_score or 0)>.5 else 0,'href':f'/app/calendar?item={item.id}'}
+def normalize_status(status):
+    return {'planned':'idea','draft_ready':'draft','approval':'in_review'}.get(status,status or 'idea')
+def setup_state(db:Session,b):
+    if not b: return {'can_generate_week':False,'missing_requirements':[]}
+    missing=[]
+    if not db.query(m.BrandDNA).filter_by(brand_id=b.id).first(): missing.append({'id':'brand_pulse','title':'Brand Pulse not completed','action_href':'/app/brand-dna'})
+    if db.query(m.ProductService).filter_by(brand_id=b.id).count()==0: missing.append({'id':'product_service','title':'No product/service added','action_href':'/app/settings'})
+    if db.query(m.ChannelAccount).filter_by(brand_id=b.id).count()==0: missing.append({'id':'channels','title':'No channels selected','action_href':'/app/integrations'})
+    if not any(a.connection_status in ('connected','mock_connected','mock') for a in db.query(m.ChannelAccount).filter_by(brand_id=b.id).all()): missing.append({'id':'approval','title':'No approval method connected','action_href':'/app/integrations'})
+    return {'can_generate_week':not missing,'missing_requirements':missing}
 
 
 def slugify(value:str):
@@ -130,7 +168,7 @@ def signup(data:Signup, db:Session=Depends(get_db)):
     u=m.User(email=email,password_hash=hash_password(data.password),name=data.name.strip() or 'Smarbiz User',locale=locale,is_super_admin=email.startswith('admin@'))
     db.add(u); db.flush()
     org_name=(data.organization_name or f"{u.name}'s workspace").strip()
-    org=m.Organization(name=org_name,slug=make_unique_org_slug(db,org_name),mode='owner',owner_user_id=u.id)
+    org=m.Organization(name=org_name,slug=make_unique_org_slug(db, org_name),mode='owner',owner_user_id=u.id)
     db.add(org); db.flush()
     db.add(m.OrganizationMember(organization_id=org.id,user_id=u.id,role='org_owner'))
     brand=m.Brand(organization_id=org.id,name=org_name,slug=org.slug+'-brand',industry='general',country='DE',primary_language=locale,timezone='UTC',description='Created during Smarbiz signup',status='onboarding')
@@ -157,7 +195,8 @@ def me(u=Depends(user_from_auth)): return {'id':u.id,'email':u.email,'name':u.na
 @app.post('/auth/invitations/accept')
 def accept_invitation(): return {'status':'accepted_placeholder'}
 @app.get('/organizations')
-def organizations(u=Depends(user_from_auth), db:Session=Depends(get_db)): return db.query(m.Organization).all()
+def organizations(u=Depends(user_from_auth), db:Session=Depends(get_db)):
+    ids=user_org_ids(db,u); return db.query(m.Organization).filter(m.Organization.id.in_(ids)).all() if ids else []
 @app.post('/organizations')
 def create_org(data:OrgIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
     org=m.Organization(name=data.name,slug=data.name.lower().replace(' ','-'),mode=data.mode,owner_user_id=u.id); db.add(org); db.flush(); db.add(m.OrganizationMember(organization_id=org.id,user_id=u.id,role='org_owner')); db.commit(); return org
@@ -172,7 +211,7 @@ def invite(id:int,payload:dict,u=Depends(user_from_auth)): return {'status':'inv
 @app.patch('/organizations/{id}/members/{member_id}')
 def member_patch(id:int,member_id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): mem=db.get(m.OrganizationMember,member_id); [setattr(mem,k,v) for k,v in payload.items() if hasattr(mem,k)]; db.commit(); return mem
 @app.get('/brands')
-def brands(u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.query(m.Brand).all()
+def brands(u=Depends(user_from_auth),db:Session=Depends(get_db)): return user_brands(db,u)
 @app.post('/brands')
 def create_brand(data:BrandIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
     b=m.Brand(**data.model_dump(), slug=data.name.lower().replace(' ','-')); db.add(b); db.commit(); return b
@@ -200,16 +239,83 @@ def memory(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return 
 def add_memory(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): note=m.BrandMemoryNote(brand_id=id,note=payload['note'],source_type=payload.get('source_type','manual'),auto_generated=False); db.add(note); db.commit(); return note
 @app.patch('/brands/{id}/memory/{memory_id}')
 def patch_memory(id:int,memory_id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): note=db.get(m.BrandMemoryNote,memory_id); [setattr(note,k,v) for k,v in payload.items() if hasattr(note,k)]; db.commit(); return note
+
+@app.get('/workspace/current')
+def current_workspace(u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    b=require_brand(db,u,None); org=db.get(m.Organization,b.organization_id) if b else None
+    return {'user':{'id':u.id,'name':u.name,'email':u.email},'organization':({'id':org.id,'name':org.name} if org else None),'brand':({'id':b.id,'name':b.name,'primary_language':b.primary_language,'timezone':b.timezone} if b else None)}
+@app.get('/calendar/overview')
+def calendar_overview(brand_id:int|None=None, from_:str|None=Query(default=None, alias='from'), to:str|None=None, view:str='week', channel:str|None=None, status:str|None=None, content_type:str|None=None, campaign_id:int|None=None, owner:int|None=None, u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    b=require_brand(db,u,brand_id); org=db.get(m.Organization,b.organization_id) if b else None; now=datetime.now(timezone.utc)
+    start=parse_dt(from_) or (now-timedelta(days=now.weekday())); end=parse_dt(to) or (start+(timedelta(days=31) if view=='month' else timedelta(days=7)))
+    q=db.query(m.CalendarItem).filter_by(brand_id=b.id) if b else db.query(m.CalendarItem).filter(False)
+    if view!='list': q=q.filter((m.CalendarItem.scheduled_at==None)|((m.CalendarItem.scheduled_at>=start)&(m.CalendarItem.scheduled_at<end)))
+    rows=q.all()
+    rows=[x for x in rows if (not channel or item_channel(x)==channel) and (not status or normalize_status(x.status)==status) and (not content_type or x.content_type==content_type) and (not campaign_id or x.campaign_id==campaign_id) and (not owner or (x.assigned_user_id or x.created_by_user_id)==owner)]
+    accounts=db.query(m.ChannelAccount).filter_by(brand_id=b.id).all() if b else []; connected={a.provider:a.connection_status in ('connected','mock_connected','mock') for a in accounts}
+    setup=setup_state(db,b); out=[calendar_item_out(x,db) for x in rows]; counts={s:len([i for i in out if i['status']==s]) for s in ['idea','draft','in_review','approved','scheduled','published','failed']}
+    missing_dates=len([i for i in out if i['status'] in ('draft','approved') and not i['scheduled_at']])
+    alerts=[]
+    if not out: alerts.append({'id':'empty_week','title':'No content planned this week','description':'Create an item or generate a weekly plan.','severity':'warning','href':'/app/calendar'})
+    if not accounts: alerts.append({'id':'no_channels','title':'Missing connected channels','description':'Connect a channel before publishing.','severity':'warning','href':'/app/integrations'})
+    rec={'title':'Complete setup' if setup['missing_requirements'] else ('Plan your first content week' if not out else 'Review this week'),'description':'Resolve missing setup steps.' if setup['missing_requirements'] else ('Generate or create your first content items.' if not out else 'Keep 3–5 posts planned ahead.'),'action_label':'Complete setup' if setup['missing_requirements'] else ('Generate first week' if not out else 'View calendar'),'action_href':setup['missing_requirements'][0]['action_href'] if setup['missing_requirements'] else '/app/calendar','action_type':'navigate' if setup['missing_requirements'] else ('generate_week' if not out else 'navigate'),'severity':'warning' if setup['missing_requirements'] else 'info'}
+    return {'user':{'id':u.id,'name':u.name,'email':u.email},'organization':({'id':org.id,'name':org.name} if org else None),'brand':({'id':b.id,'name':b.name,'primary_language':b.primary_language,'timezone':b.timezone} if b else None),'range':{'from':start.isoformat(),'to':end.isoformat(),'view':view,'timezone':b.timezone if b else u.timezone},'setup':setup,'items':out,'summary':{'total_items':len(out),'scheduled_count':counts['scheduled'],'draft_count':counts['draft'],'approval_pending_count':counts['in_review'],'published_count':counts['published'],'missing_dates_count':missing_dates},'filters':{'channels':[{'id':c,'label':c.replace('_',' ').title(),'connected':connected.get(c,False)} for c in ['instagram','telegram','bale','linkedin','google_business','tiktok','youtube','email','blog','other']],'statuses':[{'id':k,'label':k.replace('_',' ').title(),'count':counts.get(k,0)} for k in ['idea','draft','in_review','approved','scheduled','published','failed']],'content_types':[{'id':c,'label':c.replace('_',' ').title()} for c in ['post','reel','story','carousel','short_video','email','blog','google_update','telegram_post','bale_post']],'campaigns':[]},'recommended_action':rec,'alerts':alerts}
+@app.post('/calendar/items')
+def create_calendar_item(data:CalendarItemIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    b=require_brand(db,u,data.brand_id);
+    if not b: raise HTTPException(422,'Create a brand before adding calendar items')
+    if data.status=='published': raise HTTPException(422,'Published items must come from the publishing workflow')
+    if data.status=='scheduled' and not data.scheduled_at: raise HTTPException(422,'scheduled_at is required for scheduled items')
+    item=m.CalendarItem(brand_id=b.id,campaign_id=data.campaign_id,title=data.title.strip(),description=data.description or '',channels_json=[data.channel],content_type=data.content_type,status=data.status,scheduled_at=data.scheduled_at,timezone=data.timezone or b.timezone,language=b.primary_language,created_by_user_id=u.id,assigned_user_id=data.owner_user_id or u.id)
+    db.add(item); db.commit(); db.refresh(item); return calendar_item_out(item,db)
+
 @app.get('/brands/{id}/calendar')
-def calendar(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.query(m.CalendarItem).filter_by(brand_id=id).all()
+def calendar(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    require_brand(db,u,id); return db.query(m.CalendarItem).filter_by(brand_id=id).all()
 @app.post('/brands/{id}/calendar/items')
-def add_item(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): item=m.CalendarItem(brand_id=id,**payload); db.add(item); db.commit(); return item
+def add_item(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    require_brand(db,u,id); item=m.CalendarItem(brand_id=id,created_by_user_id=u.id,assigned_user_id=u.id,**payload); db.add(item); db.commit(); return item
+def owned_item(db,u,id:int):
+    item=db.get(m.CalendarItem,id)
+    if not item: raise HTTPException(404,'Calendar item not found')
+    require_brand(db,u,item.brand_id); return item
 @app.patch('/calendar/items/{id}')
-def patch_item(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): item=db.get(m.CalendarItem,id); [setattr(item,k,v) for k,v in payload.items() if hasattr(item,k)]; db.commit(); return item
+def patch_item(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    item=owned_item(db,u,id)
+    if normalize_status(item.status)=='published': raise HTTPException(403,'Published items are read-only')
+    if payload.get('status')=='published': raise HTTPException(422,'Published items must come from the publishing workflow')
+    if payload.get('status')=='scheduled' and not (payload.get('scheduled_at') or item.scheduled_at): raise HTTPException(422,'scheduled_at is required for scheduled items')
+    if 'channel' in payload: item.channels_json=[payload.pop('channel')]
+    if 'owner_user_id' in payload: item.assigned_user_id=payload.pop('owner_user_id')
+    if 'scheduled_at' in payload and payload['scheduled_at']: payload['scheduled_at']=parse_dt(payload['scheduled_at'])
+    for k,v in payload.items():
+        if hasattr(item,k): setattr(item,k,v)
+    db.commit(); db.refresh(item); return calendar_item_out(item,db)
 @app.delete('/calendar/items/{id}')
-def delete_item(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): item=db.get(m.CalendarItem,id); db.delete(item); db.commit(); return {'deleted':id}
+def delete_item(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    item=owned_item(db,u,id); db.delete(item); db.commit(); return {'deleted':id}
+@app.post('/calendar/items/{id}/duplicate')
+def duplicate_item(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    item=owned_item(db,u,id); copy=m.CalendarItem(brand_id=item.brand_id,campaign_id=item.campaign_id,title=item.title+' (copy)',description=item.description,channels_json=item.channels_json,content_type=item.content_type,status='idea',scheduled_at=None,timezone=item.timezone,language=item.language,created_by_user_id=u.id,assigned_user_id=u.id); db.add(copy); db.commit(); db.refresh(copy); return calendar_item_out(copy,db)
+@app.post('/calendar/items/{id}/schedule')
+def schedule_item(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    return patch_item(id,{'status':'scheduled','scheduled_at':payload.get('scheduled_at')},u,db)
+@app.post('/calendar/items/{id}/move')
+def move_item(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    return patch_item(id,{'scheduled_at':payload.get('scheduled_at')},u,db)
+@app.post('/calendar/generate-week')
+def gen_week_root(data:CalendarGenerateIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    b=require_brand(db,u,data.brand_id); setup=setup_state(db,b)
+    if not b: raise HTTPException(422,'Create a brand before generating a calendar')
+    if not setup['can_generate_week']: raise HTTPException(status_code=422, detail={'message':'Complete setup before generating a week','missing_requirements':setup['missing_requirements'],'action_links':setup['missing_requirements']})
+    start=data.week_start or (datetime.now(timezone.utc)-timedelta(days=datetime.now(timezone.utc).weekday()))
+    channels=data.channels or [a.provider for a in db.query(m.ChannelAccount).filter_by(brand_id=b.id).all()[:3]] or ['instagram']
+    made=[]
+    for i in range(7):
+        ch=channels[i%len(channels)]; item=m.CalendarItem(brand_id=b.id,campaign_id=data.campaign_id,title=f'Draft content idea {i+1}',description=f'Draft weekly plan for {b.name}. Review before publishing.',channels_json=[ch],content_type='post',status='draft',scheduled_at=start+timedelta(days=i,hours=10),timezone=b.timezone,language=b.primary_language,created_by_user_id=u.id,assigned_user_id=u.id); db.add(item); db.flush(); made.append(item)
+    db.commit(); return {'items':[calendar_item_out(x,db) for x in made]}
 @app.post('/brands/{id}/calendar/generate-week')
-def gen_week(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): b=db.get(m.Brand,id); return ContentStrategistAgent().run(b)
+def gen_week(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return gen_week_root(CalendarGenerateIn(brand_id=id),u,db)
 @app.post('/brands/{id}/calendar/regenerate-week')
 def regen_week(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return gen_week(id,u,db)
 @app.get('/brands/{id}/drafts')
