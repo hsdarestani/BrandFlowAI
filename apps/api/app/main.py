@@ -64,6 +64,92 @@ def setup_state(db:Session,b):
     if not any(a.connection_status in ('connected','mock_connected','mock') for a in db.query(m.ChannelAccount).filter_by(brand_id=b.id).all()): missing.append({'id':'approval','title':'No approval method connected','action_href':'/app/integrations'})
     return {'can_generate_week':not missing,'missing_requirements':missing}
 
+
+def slugify(value:str):
+    slug=re.sub(r'[^a-z0-9]+','-',(value or 'workspace').strip().lower()).strip('-')
+    return slug or 'workspace'
+
+def make_unique_org_slug(db:Session, org_name:str):
+    base=slugify(org_name); slug=base; i=2
+    while db.query(m.Organization).filter_by(slug=slug).first():
+        slug=f'{base}-{i}'; i+=1
+    return slug
+
+def current_org(db:Session,u):
+    mem=db.query(m.OrganizationMember).filter_by(user_id=u.id,status='active').first()
+    if mem: return db.get(m.Organization,mem.organization_id)
+    return db.query(m.Organization).filter_by(owner_user_id=u.id).first()
+
+def active_brand(db:Session,org):
+    if not org: return None
+    return db.query(m.Brand).filter_by(organization_id=org.id).order_by(m.Brand.created_at.asc()).first()
+
+def setup_status(done, possible):
+    return 'done' if done else ('in_progress' if possible else 'not_started')
+
+def build_home_overview(db:Session,u):
+    org=current_org(db,u); brand=active_brand(db,org)
+    now=datetime.now(timezone.utc); week_ago=now-timedelta(days=6)
+    dna=db.query(m.BrandDNA).filter_by(brand_id=brand.id).first() if brand else None
+    products=db.query(m.ProductService).filter_by(brand_id=brand.id).count() if brand else 0
+    channels=db.query(m.ChannelAccount).filter(m.ChannelAccount.brand_id==brand.id,m.ChannelAccount.connection_status.in_(['connected','mock_connected','mock'])).count() if brand else 0
+    approval_methods=channels
+    calendar_count=db.query(m.CalendarItem).filter_by(brand_id=brand.id).count() if brand else 0
+    draft_count=db.query(m.ContentDraft).filter_by(brand_id=brand.id).count() if brand else 0
+    approvals_q=db.query(m.ApprovalRequest).join(m.ContentDraft,m.ContentDraft.id==m.ApprovalRequest.draft_id).filter(m.ContentDraft.brand_id==brand.id) if brand else None
+    approval_count=approvals_q.count() if approvals_q else 0
+    pending_approvals=approvals_q.filter(m.ApprovalRequest.status=='pending').count() if approvals_q else 0
+    published=db.query(m.PublishedPost).join(m.ContentDraft,m.ContentDraft.id==m.PublishedPost.draft_id).filter(m.ContentDraft.brand_id==brand.id).count() if brand else 0
+    reports=db.query(m.WeeklyReport).filter_by(brand_id=brand.id).count() if brand else 0
+    step_defs=[
+      ('create_brand','Create brand','Create your first brand workspace.',bool(brand),True,5,'Create brand','/onboarding'),
+      ('brand_pulse','Complete Brand Pulse / Brand DNA','Teach Smarbiz your voice, offers, and rules.',bool(dna),bool(brand),15,'Complete Brand Pulse','/app/brand-dna'),
+      ('product_service','Add product/service','Add at least one offer to promote.',products>0,bool(dna),8,'Add product/service','/app/brand-dna?section=offers'),
+      ('content_channels','Choose content channels','Select the channels you want to publish to.',channels>0,products>0,5,'Choose channels','/app/integrations'),
+      ('approval_method','Connect at least one approval method','Connect an approval path for reviews.',approval_methods>0,channels>0,5,'Connect approval channel','/app/integrations?type=approval'),
+      ('generate_week','Generate first week','Create your first weekly content plan.',calendar_count>0,approval_methods>0,10,'Generate first week','/app/calendar?generate=1'),
+      ('create_draft','Create first draft','Generate or write your first draft.',draft_count>0,calendar_count>0,10,'Create first draft','/app/content-studio?new=1'),
+      ('send_approval','Send first approval','Send a draft to approval.',approval_count>0,draft_count>0,3,'Send for approval','/app/content-studio?status=draft'),
+      ('publish_post','Publish first post','Publish or schedule approved content.',published>0,approval_count>0,5,'Publish post','/app/calendar?status=scheduled'),
+      ('review_insight','Review first insight','Review performance after publishing.',reports>0 or published>0,published>0,5,'Review insights','/app/reports')
+    ]
+    steps=[{'id':i,'title':t,'description':d,'status':setup_status(done,poss),'estimated_time_minutes':mins,'action_label':al,'action_href':href} for i,t,d,done,poss,mins,al,href in step_defs]
+    done=sum(1 for x in steps if x['status']=='done'); first=next((x['id'] for x in steps if x['status']!='done'),None)
+    drafts_waiting=db.query(m.ContentDraft).filter(m.ContentDraft.brand_id==brand.id,m.ContentDraft.status.in_(['draft','draft_ready','in_review'])).count() if brand else 0
+    scheduled=db.query(m.ScheduledPost).join(m.ContentDraft,m.ContentDraft.id==m.ScheduledPost.draft_id).filter(m.ContentDraft.brand_id==brand.id,m.ScheduledPost.status=='scheduled',m.ScheduledPost.scheduled_at>=now).count() if brand else 0
+    approved=approvals_q.filter(m.ApprovalRequest.status=='approved').count() if approvals_q else 0
+    approval_rate='No approvals yet' if approval_count==0 else f'{round(approved/approval_count*100)}%'
+    usage=db.query(m.AIUsageLog).filter(m.AIUsageLog.organization_id==org.id).count() if org else 0
+    kpis=[{'id':'drafts_waiting','label':'Drafts waiting','value':drafts_waiting,'href':'/app/content-studio?status=draft','helper':'Drafts or reviews needing attention'}, {'id':'posts_scheduled','label':'Posts scheduled','value':scheduled,'href':'/app/calendar?status=scheduled','helper':'Upcoming scheduled posts'}, {'id':'channels_connected','label':'Channels connected','value':channels,'href':'/app/integrations','helper':'Connected publishing or approval channels'}, {'id':'ai_credits','label':'AI credits','value':'—','href':'/app/settings?section=usage','helper':'Not tracked yet' if usage==0 else f'{usage} AI operations logged'}, {'id':'quality_warnings','label':'Quality warnings','value':0,'href':'/app/content-studio?filter=warnings','helper':'No warnings yet'}, {'id':'approval_rate','label':'Approval rate','value':approval_rate,'href':'/app/reports?section=approvals','helper':'Approved requests divided by total requests'}]
+    days=[]
+    for n in range(7):
+      day=(week_ago+timedelta(days=n)).date(); start=datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc); end=start+timedelta(days=1)
+      gen=db.query(m.ContentDraft).filter(m.ContentDraft.brand_id==brand.id,m.ContentDraft.created_at>=start,m.ContentDraft.created_at<end).count() if brand else 0
+      appr=approvals_q.filter(m.ApprovalRequest.updated_at>=start,m.ApprovalRequest.updated_at<end,m.ApprovalRequest.status=='approved').count() if approvals_q else 0
+      pub=db.query(m.PublishedPost).join(m.ContentDraft,m.ContentDraft.id==m.PublishedPost.draft_id).filter(m.ContentDraft.brand_id==brand.id,m.PublishedPost.published_at>=start,m.PublishedPost.published_at<end).count() if brand else 0
+      days.append({'day':day.isoformat(),'generated':gen,'approved':appr,'published':pub})
+    pipeline=[]
+    for status,label,href in [('ideas','Ideas','/app/content-studio?status=ideas'),('drafts','Drafts','/app/content-studio?status=draft'),('in_review','In review','/app/content-studio?status=in_review'),('approved','Approved','/app/content-studio?status=approved'),('scheduled','Scheduled','/app/calendar?status=scheduled'),('published','Published','/app/calendar?status=published')]:
+      q=db.query(m.ContentDraft).filter_by(brand_id=brand.id) if brand else None
+      items=[]; count=0
+      if q and status in ['drafts','in_review','approved']:
+        statuses={'drafts':['draft','draft_ready'],'in_review':['in_review'],'approved':['approved']}[status]; rows=q.filter(m.ContentDraft.status.in_(statuses)).order_by(m.ContentDraft.updated_at.desc()).all(); count=len(rows); items=[{'id':r.id,'title':r.title,'channel':r.channel,'href':f'/app/content-studio?draft={r.id}'} for r in rows[:3]]
+      elif brand and status=='scheduled': count=scheduled
+      elif brand and status=='published': count=published
+      elif brand and status=='ideas': count=db.query(m.CalendarItem).filter_by(brand_id=brand.id,status='planned').count()
+      pipeline.append({'status':status,'label':label,'count':count,'href':href,'items':items})
+    recent=[]
+    if brand:
+      for r in db.query(m.ContentDraft).filter_by(brand_id=brand.id).order_by(m.ContentDraft.updated_at.desc()).limit(6): recent.append({'id':r.id,'title':r.title,'type':'Draft','status':r.status,'channel':r.channel,'score':float(r.brand_fit_score) if r.brand_fit_score is not None else None,'updated_at':r.updated_at.isoformat() if hasattr(r.updated_at,'isoformat') else str(r.updated_at),'href':f'/app/content-studio?draft={r.id}'})
+    alerts=[]
+    if channels==0: alerts.append({'id':'no_channels','title':'No connected channels','description':'Connect a publishing or approval channel.','severity':'warning','href':'/app/integrations'})
+    if approval_methods==0: alerts.append({'id':'missing_approval','title':'Missing approval channel','description':'Connect at least one approval method.','severity':'warning','href':'/app/integrations?type=approval'})
+    if calendar_count==0: alerts.append({'id':'no_content','title':'No content generated','description':'Generate your first week to start tracking activity.','severity':'info','href':'/app/calendar?generate=1'})
+    if pending_approvals: alerts.append({'id':'pending_approvals','title':'Pending approvals','description':f'{pending_approvals} approval request(s) need review.','severity':'warning','href':'/app/approvals?status=pending'})
+    rec=next((x for x in steps if x['status']!='done'),None)
+    action={'title':rec['title'] if rec else 'Review insights','description':rec['description'] if rec else 'Your setup is complete. Review reports and plan the next cycle.','action_label':rec['action_label'] if rec else 'Open reports','action_href':rec['action_href'] if rec else '/app/reports','severity':'warning' if rec else 'success','missing_requirements':[x['title'] for x in steps if x['status']!='done'][:2] if rec and rec['status']=='not_started' else []}
+    return {'user':{'id':u.id,'name':u.name,'email':u.email},'organization':({'id':org.id,'name':org.name,'mode':org.mode} if org else None),'brand':({'id':brand.id,'name':brand.name,'industry':brand.industry,'primary_language':brand.primary_language,'setup_status':brand.status} if brand else None),'setup':{'completion_percent':round(done/len(steps)*100),'first_incomplete_step_id':first,'steps':steps},'kpis':kpis,'weekly_activity':days,'pipeline':pipeline,'recent_work':recent,'recommended_action':action,'alerts':alerts,'memory_summary':{'title':'Smarbiz Memory','description':('Brand DNA captured' if dna else 'Brand memory is not configured yet'),'href':'/app/brand-dna'},'channel_health':{'title':'Channel Health','description':f'{channels} connected channel(s)' if channels else 'No channels connected','status':'good' if channels else 'missing','href':'/app/integrations'},'approval_status_summary':{'pending':pending_approvals,'approved':approved,'total':approval_count}}
+
 def user_from_auth(authorization:str|None=Header(default=None), db:Session=Depends(get_db)):
     if not authorization: raise HTTPException(401,'Missing bearer token')
     try: email=decode_token(authorization.replace('Bearer ',''))['sub']
@@ -91,6 +177,12 @@ def signup(data:Signup, db:Session=Depends(get_db)):
         db.add(m.SetupChecklistItem(brand_id=brand.id,key=key,label=label,status='pending'))
     db.commit()
     return {'access_token':create_token(u.email),'user':{'id':u.id,'email':u.email,'name':u.name,'is_super_admin':u.is_super_admin},'organization':{'id':org.id,'name':org.name},'brand':{'id':brand.id,'name':brand.name}}
+@app.get('/dashboard/home')
+def dashboard_home(u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    return build_home_overview(db,u)
+@app.get('/environment')
+def environment(): return {'mode':'Demo mode' if DEMO_MODE else 'Production mode'}
+
 @app.post('/auth/login')
 def login(data:Login, db:Session=Depends(get_db)):
     u=db.query(m.User).filter_by(email=data.email).first()
