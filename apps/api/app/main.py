@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -5,7 +6,7 @@ from secrets import token_urlsafe
 from hashlib import sha256
 from datetime import datetime, timezone
 from pydantic import BaseModel
-from .database import Base, engine, get_db
+from .database import Base, engine, get_db, settings
 from . import models as m
 from .security import hash_password, verify_password, create_token, decode_token
 from .services.ai.agents import BrandAnalystAgent, ContentStrategistAgent, CopywriterAgent, ApprovalLearningAgent, PerformanceAnalystAgent
@@ -13,13 +14,22 @@ from .services.connectors.providers import get_connector, connector_catalog
 from .services.connectors.bale_safir import normalize_iran_phone
 Base.metadata.create_all(bind=engine)
 app=FastAPI(title='Smarbiz API', version='0.1.0')
-app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:3000'], allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
+cors_origins=[o.strip() for o in os.getenv('CORS_ORIGINS','http://localhost:3000,https://smarbiz.sbs,https://www.smarbiz.sbs').split(',') if o.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
 class Signup(BaseModel): email:str; password:str; name:str='Smarbiz User'; locale:str='en'; organization_name:str='Smarbiz Workspace'; preferred_language:str|None=None
 class Login(BaseModel): email:str; password:str
 class OrgIn(BaseModel): name:str; mode:str='owner'
 class BrandIn(BaseModel): organization_id:int; name:str; industry:str='general'; country:str='DE'; primary_language:str='en'; timezone:str='UTC'; description:str=''
 class ActionIn(BaseModel): action:str; comment:str|None=None; revision_prompt:str|None=None; save_to_memory:bool=True
 class DraftPatch(BaseModel): title:str|None=None; body:str|None=None; status:str|None=None
+
+
+def make_unique_org_slug(db, org_name:str):
+    base='-'.join((org_name or 'smarbiz-workspace').lower().split()) or 'smarbiz-workspace'
+    slug=base; i=2
+    while db.query(m.Organization).filter_by(slug=slug).first():
+        slug=f'{base}-{i}'; i+=1
+    return slug
 
 def user_from_auth(authorization:str|None=Header(default=None), db:Session=Depends(get_db)):
     if not authorization: raise HTTPException(401,'Missing bearer token')
@@ -39,7 +49,7 @@ def signup(data:Signup, db:Session=Depends(get_db)):
     u=m.User(email=email,password_hash=hash_password(data.password),name=data.name.strip() or 'Smarbiz User',locale=locale,is_super_admin=email.startswith('admin@'))
     db.add(u); db.flush()
     org_name=(data.organization_name or f"{u.name}'s workspace").strip()
-    org=m.Organization(name=org_name,slug=org_name.lower().replace(' ','-'),mode='owner',owner_user_id=u.id)
+    org=m.Organization(name=org_name,slug=make_unique_org_slug(db, org_name),mode='owner',owner_user_id=u.id)
     db.add(org); db.flush()
     db.add(m.OrganizationMember(organization_id=org.id,user_id=u.id,role='org_owner'))
     brand=m.Brand(organization_id=org.id,name=org_name,slug=org.slug+'-brand',industry='general',country='DE',primary_language=locale,timezone='UTC',description='Created during Smarbiz signup',status='onboarding')
@@ -268,7 +278,6 @@ def flags(u=Depends(user_from_auth),db:Session=Depends(get_db)): return db.query
 def patch_flag(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): f=db.get(m.FeatureFlag,id); [setattr(f,k,v) for k,v in payload.items() if hasattr(f,k)]; db.commit(); return f
 
 # --- Real Product + Light UI v4 additive endpoints ---
-import os
 DEMO_MODE = os.getenv('DEMO_MODE', 'true').lower() == 'true'
 
 @app.get('/environment')
@@ -345,3 +354,136 @@ def disconnect_account(id:int,u=Depends(user_from_auth),db:Session=Depends(get_d
 
 @app.post('/brands/{id}/analytics/manual-entry')
 def manual_metric(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): row=m.ManualMetric(brand_id=id,metric_date=payload.get('metric_date',datetime.now(timezone.utc).date().isoformat()),metrics_json=payload.get('metrics',payload)); db.add(row); db.commit(); return row
+
+# --- Tenant-aware Content Studio endpoints ---
+from typing import Any
+class StudioDraftIn(BaseModel):
+    title:str|None=None; body:str|None=None; hook:str|None=None; cta:str|None=None; hashtags:str|list[str]|None=None
+    goal:str|None=None; channel:str|None=None; language:str|None=None; content_type:str|None=None; product_or_offer:str|None=None; tone:str|None=None; prompt:str|None=None; status:str|None=None
+class StudioGenerateIn(BaseModel):
+    goal:str; channel:str; language:str='en'; content_type:str='post'; product_or_offer:str=''; tone:str='clear'; prompt:str
+class StudioTransformIn(BaseModel): action:str; target_language:str|None=None
+class StudioScheduleIn(BaseModel): date:str; time:str; timezone:str='UTC'; channel:str|None=None
+
+def _studio_error(status:int, code:str, message:str, details:Any=None):
+    raise HTTPException(status_code=status, detail={'error':{'code':code,'message':message,'details':details or {}}})
+def _user_org_brand(u, db):
+    mem=db.query(m.OrganizationMember).filter_by(user_id=u.id,status='active').first()
+    org=db.get(m.Organization,mem.organization_id) if mem else db.query(m.Organization).filter_by(owner_user_id=u.id).first()
+    brand=db.query(m.Brand).filter_by(organization_id=org.id).first() if org else None
+    return org, brand
+
+def _assert_draft(draft_id:int,u,db):
+    d=db.get(m.ContentDraft,draft_id)
+    if not d: _studio_error(404,'draft_not_found','Draft not found')
+    org,brand=_user_org_brand(u,db)
+    if not brand or d.brand_id!=brand.id: _studio_error(403,'wrong_tenant','Draft belongs to another workspace')
+    return d,org,brand
+
+def _meta(d):
+    if not d.current_version_id: return {}
+    v=db_global.query(m.ContentVersion).filter_by(id=d.current_version_id).first() if False else None
+    return {}
+
+def _draft_json(d, db=None):
+    meta={}
+    if db and d.current_version_id:
+        v=db.get(m.ContentVersion,d.current_version_id); meta=(v.metadata_json or {}) if v else {}
+    return {'id':d.id,'brand_id':d.brand_id,'title':d.title or '','body':d.body or '','hook':meta.get('hook',''),'cta':meta.get('cta',''),'hashtags':' '.join(d.hashtags_json or meta.get('hashtags',[]) or []),'goal':meta.get('goal',''),'channel':d.channel,'language':d.language,'content_type':d.content_type,'product_or_offer':meta.get('product_or_offer',''),'tone':meta.get('tone',''),'prompt':meta.get('prompt',''),'status':('draft' if d.status=='draft_ready' else d.status),'quality_score':float(d.brand_fit_score or 0),'warnings':meta.get('warnings',[]),'compliance_result':meta.get('compliance_result'),'updated_at':d.updated_at.isoformat() if hasattr(d.updated_at,'isoformat') else str(d.updated_at)}
+
+def _brand_rules(brand, db):
+    dna=db.query(m.BrandDNA).filter_by(brand_id=brand.id).first() if brand else None
+    if not dna: return []
+    rules=[]
+    tone=(dna.voice_json or {}).get('tone') or (dna.voice_json or {}).get('personality')
+    if tone: rules.append({'id':'tone','label':'Allowed tone','description':str(tone),'severity':'info'})
+    for w in (dna.forbidden_words_json or {}).get('items',[])[:8]: rules.append({'id':'forbidden-'+str(w),'label':'Forbidden phrase','description':str(w),'severity':'danger'})
+    if dna.compliance_json: rules.append({'id':'approval','label':'Approval notes','description':str(dna.compliance_json),'severity':'warning'})
+    if dna.channel_rules_json: rules.append({'id':'channels','label':'Channel rules','description':str(dna.channel_rules_json),'severity':'info'})
+    return rules
+
+def _missing(brand, db):
+    miss=[]
+    if not brand or brand.status!='active': miss.append({'id':'brand_pulse','title':'Brand Pulse incomplete','action_href':'/onboarding'})
+    if brand and db.query(m.ProductService).filter_by(brand_id=brand.id).count()==0: miss.append({'id':'product','title':'No product/service','action_href':'/onboarding'})
+    if brand and db.query(m.ChannelAccount).filter_by(brand_id=brand.id).count()==0: miss.append({'id':'channels','title':'No channels selected','action_href':'/app/integrations'})
+    if brand and not db.query(m.ChannelAccount).filter(m.ChannelAccount.brand_id==brand.id,m.ChannelAccount.provider.in_(['telegram','bale','email','approval_link'])).first(): miss.append({'id':'approval','title':'No approval method','action_href':'/app/integrations'})
+    return miss
+
+def _save_version(d, db, u, meta, ai=True):
+    v=m.ContentVersion(draft_id=d.id,version_number=db.query(m.ContentVersion).filter_by(draft_id=d.id).count()+1,title=d.title,body=d.body,metadata_json=meta,created_by_user_id=u.id,ai_generated=ai); db.add(v); db.flush(); d.current_version_id=v.id
+
+def _apply_payload(d,p):
+    data=p.model_dump(exclude_none=True) if hasattr(p,'model_dump') else p
+    d.title=data.get('title',d.title) or 'Untitled draft'; d.body=data.get('body',d.body) or ''; d.channel=data.get('channel',d.channel or 'instagram'); d.language=data.get('language',d.language or 'en'); d.content_type=data.get('content_type',d.content_type or 'post'); d.status=data.get('status',d.status or 'draft')
+    hs=data.get('hashtags')
+    if isinstance(hs,str): d.hashtags_json=[x for x in hs.split() if x]
+    elif isinstance(hs,list): d.hashtags_json=hs
+    return data
+
+@app.get('/studio/overview')
+def studio_overview(u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=_user_org_brand(u,db); drafts=db.query(m.ContentDraft).filter_by(brand_id=brand.id).order_by(m.ContentDraft.updated_at.desc()).limit(20).all() if brand else []
+    miss=_missing(brand,db); rec={'title':'Generate first draft','description':'Start from your brief and Brand Pulse.','action_label':'Generate first draft','action_type':'generate'} if not drafts else {'title':'Run compliance check','description':'Check the active draft before approval.','action_label':'Compliance check','action_type':'check'}
+    return {'user':{'id':u.id,'name':u.name,'email':u.email},'organization':({'id':org.id,'name':org.name} if org else None),'brand':({'id':brand.id,'name':brand.name,'primary_language':brand.primary_language,'industry':brand.industry} if brand else None),'setup':{'can_generate':bool(brand and not any(x['id']=='brand_pulse' for x in miss)),'missing_requirements':miss},'drafts':[_draft_json(d,db) for d in drafts],'brand_rules':_brand_rules(brand,db),'recommended_action':rec,'products':[p.name for p in (db.query(m.ProductService).filter_by(brand_id=brand.id).all() if brand else [])],'channels':[a.provider for a in (db.query(m.ChannelAccount).filter_by(brand_id=brand.id).all() if brand else [])]}
+@app.get('/studio/drafts')
+def studio_drafts(u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=_user_org_brand(u,db); return [_draft_json(d,db) for d in (db.query(m.ContentDraft).filter_by(brand_id=brand.id).order_by(m.ContentDraft.updated_at.desc()).all() if brand else [])]
+@app.get('/studio/drafts/{id}')
+def studio_get_draft(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): d,_,_=_assert_draft(id,u,db); return _draft_json(d,db)
+@app.post('/studio/drafts')
+def studio_create_draft(payload:StudioDraftIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=_user_org_brand(u,db)
+    if not brand: _studio_error(422,'missing_brand','Create a brand before drafting')
+    d=m.ContentDraft(brand_id=brand.id,channel=payload.channel or 'instagram',content_type=payload.content_type or 'post',language=payload.language or brand.primary_language or 'en',title=payload.title or 'Untitled draft',body=payload.body or '',created_by_user_id=u.id,status=payload.status or 'draft'); db.add(d); db.flush(); meta=_apply_payload(d,payload); _save_version(d,db,u,meta,False); db.commit(); return _draft_json(d,db)
+@app.patch('/studio/drafts/{id}')
+def studio_patch_draft(id:int,payload:StudioDraftIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    d,_,_=_assert_draft(id,u,db)
+    if d.status=='published': _studio_error(409,'published_read_only','Published drafts are read-only')
+    meta=_apply_payload(d,payload); _save_version(d,db,u,meta,False); db.commit(); return _draft_json(d,db)
+@app.delete('/studio/drafts/{id}')
+def studio_delete_draft(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): d,_,_=_assert_draft(id,u,db); d.status='archived'; db.commit(); return {'deleted':id}
+@app.post('/studio/generate')
+def studio_generate(payload:StudioGenerateIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=_user_org_brand(u,db)
+    if not brand: _studio_error(422,'missing_brand','Create Brand Pulse before generation')
+    if not payload.goal or not payload.channel or not payload.prompt: _studio_error(422,'validation_error','Goal, channel, and prompt are required')
+    name=brand.name; offer=payload.product_or_offer or 'your offer'; hook=f"{offer}: {payload.goal}"; title=f"{payload.content_type.title()} for {offer}"; cta='Book a consultation' if any(x in (offer+payload.prompt).lower() for x in ['clinic','medical','botox','esthetic']) else 'Contact us to learn more'
+    body=f"{hook}\n\n{payload.prompt}\n\nHere is a {payload.tone} {payload.channel} message from {name} about {offer}. It explains the value clearly, keeps the promise realistic, and invites the audience to take the next step.\n\n{cta}"
+    hs=[f"#{name.replace(' ','')[:20]}", '#SmarbizDraft', f"#{payload.channel}"]
+    warnings=[]
+    d=m.ContentDraft(brand_id=brand.id,channel=payload.channel,content_type=payload.content_type,language=payload.language,title=title,body=body,hashtags_json=hs,status='draft',brand_fit_score=.82,compliance_score=.74,ai_provider=settings.ai_provider,created_by_user_id=u.id); db.add(d); db.flush(); meta={**payload.model_dump(),'hook':hook,'cta':cta,'hashtags':hs,'warnings':warnings,'provider':settings.ai_provider}; _save_version(d,db,u,meta,True); db.commit(); return {'draft':_draft_json(d,db),'provider':settings.ai_provider,'warnings':warnings}
+@app.post('/studio/drafts/{id}/transform')
+def studio_transform(id:int,payload:StudioTransformIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    d,_,_=_assert_draft(id,u,db); meta=(db.get(m.ContentVersion,d.current_version_id).metadata_json or {}) if d.current_version_id else {}; action=payload.action
+    if action=='shorten': d.body=d.body[:420].rstrip()+('…' if len(d.body)>420 else '')
+    elif action=='more_formal': d.body='In a professional tone: '+d.body; meta['tone']='formal'
+    elif action=='more_direct': d.body=d.body+'\n\nTake the next step today.'; meta['cta']='Take the next step today.'
+    elif action=='translate':
+        if not payload.target_language: _studio_error(422,'missing_target_language','Choose English, Persian, or German')
+        d.language=payload.target_language; d.body=f"[{payload.target_language}] {d.body}"
+    else: d.body=d.body+'\n\nRewritten for clarity while preserving the original intent.'
+    _save_version(d,db,u,meta,True); db.commit(); return _draft_json(d,db)
+@app.post('/studio/drafts/{id}/compliance-check')
+def studio_compliance(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    d,_,brand=_assert_draft(id,u,db); text=(d.title+' '+d.body).lower(); warnings=[]; suggestions=[]
+    if not ((db.get(m.ContentVersion,d.current_version_id).metadata_json or {}).get('cta') if d.current_version_id else ''): warnings.append({'id':'missing_cta','title':'Missing CTA','description':'Add a clear next step.','severity':'warning'}); suggestions.append('Add a clear CTA.')
+    for term in ['guaranteed','cure','risk-free','always','never']:
+        if term in text: warnings.append({'id':'absolute_'+term,'title':'Absolute claim','description':f'Avoid unsupported absolute claim: {term}.','severity':'danger'}); suggestions.append('Use qualified, evidence-aware wording.')
+    if any(x in text for x in ['botox','clinic','medical','treatment','esthetic']): suggestions.append('Use consultation-first wording and avoid guaranteed results.')
+    result={'status':'blocked' if any(w['severity']=='danger' for w in warnings) else ('warnings' if warnings else 'passed'),'summary':'Review complete with actionable checks.','warnings':warnings,'suggestions':suggestions}
+    meta=(db.get(m.ContentVersion,d.current_version_id).metadata_json or {}) if d.current_version_id else {}; meta['compliance_result']=result; meta['warnings']=warnings; _save_version(d,db,u,meta,False); db.commit(); return {'draft':_draft_json(d,db),'compliance_result':result}
+@app.post('/studio/drafts/{id}/send-for-approval')
+def studio_send_approval(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    d,_,brand=_assert_draft(id,u,db); acc=db.query(m.ChannelAccount).filter(m.ChannelAccount.brand_id==brand.id,m.ChannelAccount.provider.in_(['telegram','bale','email','approval_link'])).first()
+    if not acc: _studio_error(422,'missing_approval_method','Connect an approval method before sending.',{'action_href':'/app/integrations'})
+    tok=token_urlsafe(24); ar=m.ApprovalRequest(draft_id=id,requested_by_user_id=u.id,public_token_hash=sha256(tok.encode()).hexdigest()); db.add(ar); d.status='in_review'; db.commit(); return {'approval_request_id':ar.id,'status':ar.status,'approval_url':f'/public/approval/{tok}','draft':_draft_json(d,db)}
+@app.post('/studio/drafts/{id}/schedule')
+def studio_schedule(id:int,payload:StudioScheduleIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    d,_,brand=_assert_draft(id,u,db); acc=db.query(m.ChannelAccount).filter_by(brand_id=brand.id,provider=payload.channel or d.channel).first() or db.query(m.ChannelAccount).filter_by(brand_id=brand.id).first()
+    if not acc: acc=m.ChannelAccount(brand_id=brand.id,provider=payload.channel or d.channel,account_name='Assisted publishing',account_identifier='assisted',connection_status='needs_credentials'); db.add(acc); db.flush()
+    sp=m.ScheduledPost(draft_id=id,channel_account_id=acc.id,scheduled_at=datetime.fromisoformat(f"{payload.date}T{payload.time}:00"),status='scheduled'); db.add(sp); d.status='scheduled'; db.commit(); return {'scheduled_post_id':sp.id,'status':sp.status,'warning':None if acc.connection_status=='connected' else 'Connect channel before publishing.','draft':_draft_json(d,db)}
+@app.post('/studio/drafts/{id}/export-assisted-kit')
+def studio_export(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    d,_,_=_assert_draft(id,u,db); j=_draft_json(d,db); kit=f"# {j['title']}\n\nChannel: {j['channel']}\nContent type: {j['content_type']}\n\nHook: {j.get('hook','')}\n\n{j['body']}\n\nCTA: {j.get('cta','')}\nHashtags: {j.get('hashtags','')}\n\nCompliance warnings: {j.get('warnings',[])}\nAsset suggestions: Use approved brand visuals."
+    return {'filename':f"smarbiz-draft-{id}-kit.md",'content':kit}
