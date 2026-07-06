@@ -1176,3 +1176,170 @@ def integration_send_test(id:int,payload:dict|None=None,u=Depends(user_from_auth
 def oauth_start(provider:str,u=Depends(user_from_auth),db:Session=Depends(get_db)): return {'status':'not_implemented','message':'OAuth is not connected yet. Use assisted setup where available.'}
 @app.get('/integrations/oauth/{provider}/callback')
 def oauth_callback(provider:str,u=Depends(user_from_auth),db:Session=Depends(get_db)): return {'status':'not_implemented','message':'OAuth callback is not implemented yet.'}
+
+
+# --- Patch 07 settings + super admin helpers ---
+def structured_error(code:str,message:str,status:int=400,details:dict|None=None):
+    raise HTTPException(status_code=status, detail={'error':code,'message':message,'details':details or {}})
+
+def require_super_admin(u=Depends(user_from_auth)):
+    if not getattr(u,'is_super_admin',False):
+        raise HTTPException(status_code=403, detail={'error':'forbidden','message':'You do not have access to Super Admin.'})
+    return u
+
+def member_role(db,u,org):
+    if not org: return None
+    mem=db.query(m.OrganizationMember).filter_by(user_id=u.id,organization_id=org.id,status='active').first()
+    return mem.role if mem else ('org_owner' if org.owner_user_id==u.id else None)
+
+def can_manage_team(db,u,org): return member_role(db,u,org) in ['org_owner','admin'] or getattr(u,'is_super_admin',False)
+
+def settings_roles():
+    return [
+      {'id':'org_owner','label':'Organization owner','description':'Full workspace administration.','permissions':['billing','team','settings','content']},
+      {'id':'brand_manager','label':'Brand manager','description':'Manage brand setup, calendar and approvals.','permissions':['brand','calendar','approvals']},
+      {'id':'creator','label':'Creator','description':'Create drafts and assets.','permissions':['studio','assets']},
+      {'id':'client_approver','label':'Client approver','description':'Review approval requests.','permissions':['approvals']},
+      {'id':'analyst','label':'Analyst','description':'View insights and reports.','permissions':['analytics','reports']},
+      {'id':'viewer','label':'Viewer','description':'Read-only access.','permissions':['read']}]
+
+def settings_overview_payload(db,u):
+    org=current_org(db,u); brand=active_brand(db,org); home=build_home_overview(db,u) if org and brand else {'setup':{'completion_percent':0,'steps':[]},'alerts':[]}
+    members=[]
+    if org:
+        for mem in db.query(m.OrganizationMember).filter_by(organization_id=org.id).all():
+            mu=db.get(m.User,mem.user_id) if mem.user_id else None
+            members.append({'id':mem.id,'user_id':mem.user_id,'name':getattr(mu,'name',None),'email':getattr(mu,'email','invited-user@pending.local'),'role':mem.role,'status':mem.status,'joined_at':mem.accepted_at.isoformat() if getattr(mem.accepted_at,'isoformat',None) else None})
+    usage={'ai_credits_used':db.query(m.AIUsageLog).filter_by(organization_id=org.id).count() if org else 0,'ai_credits_limit':None,'storage_used_bytes':None,'assets_count':db.query(m.Asset).filter_by(brand_id=brand.id).count() if brand else 0,'drafts_count':db.query(m.ContentDraft).filter_by(brand_id=brand.id).count() if brand else 0,'reports_count':db.query(m.WeeklyReport).filter_by(brand_id=brand.id).count() if brand else 0}
+    ai={'provider':os.getenv('AI_PROVIDER','mock'),'model':os.getenv('AI_MODEL'),'status':'mock' if os.getenv('AI_PROVIDER','mock')=='mock' else 'missing','last_test_message':None}
+    return {'user':{'id':u.id,'name':u.name,'email':u.email,'locale':u.locale,'is_super_admin':u.is_super_admin},'organization':({'id':org.id,'name':org.name,'mode':org.mode,'billing_status':org.billing_status,'plan':None} if org else None),'brand':({'id':brand.id,'name':brand.name,'primary_language':brand.primary_language,'timezone':brand.timezone,'country':brand.country,'industry':brand.industry} if brand else None),'team':members,'roles':settings_roles(),'setup':home['setup'],'usage':usage,'ai_provider':ai,'preferences':{'default_language':u.locale or 'en','default_timezone':u.timezone or (brand.timezone if brand else 'UTC'),'approval_required_before_publish':True,'assisted_publishing_mode':True},'alerts':home.get('alerts',[]),'permissions':{'can_manage_team':can_manage_team(db,u,org)}}
+
+@app.get('/settings/overview')
+def settings_overview(u=Depends(user_from_auth),db:Session=Depends(get_db)): return settings_overview_payload(db,u)
+@app.patch('/settings/profile')
+def settings_profile(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    if 'name' in payload: u.name=(payload.get('name') or u.name).strip()
+    if 'locale' in payload: u.locale=payload.get('locale') or u.locale
+    if 'timezone' in payload: u.timezone=payload.get('timezone') or u.timezone
+    db.commit(); return settings_overview_payload(db,u)
+@app.patch('/settings/organization')
+def settings_org(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org=current_org(db,u)
+    if not org: structured_error('missing_workspace','Workspace not found',404)
+    if not can_manage_team(db,u,org): structured_error('forbidden','Only workspace owners can update organization settings.',403)
+    if payload.get('name'): org.name=payload['name'].strip()
+    if payload.get('mode'): org.mode=payload['mode']
+    db.commit(); return settings_overview_payload(db,u)
+@app.patch('/settings/brand-defaults')
+def settings_brand(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u)
+    for k in ['name','industry','country','timezone','primary_language']:
+        if k in payload and hasattr(brand,k): setattr(brand,k,payload[k])
+    db.commit(); return settings_overview_payload(db,u)
+@app.get('/settings/team')
+def settings_team(u=Depends(user_from_auth),db:Session=Depends(get_db)): return settings_overview_payload(db,u)['team']
+@app.get('/settings/roles')
+def get_roles(u=Depends(user_from_auth)): return settings_roles()
+@app.post('/settings/team/invite')
+def invite_team(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org=current_org(db,u)
+    if not can_manage_team(db,u,org): structured_error('forbidden','Only workspace owners can invite team members.',403)
+    email=(payload.get('email') or '').strip().lower(); role=payload.get('role') or 'viewer'
+    if not email or '@' not in email: structured_error('invalid_email','Enter a valid email address.',422)
+    invited=db.query(m.User).filter_by(email=email).first() or m.User(email=email,password_hash='',name='',locale='en',is_active=False)
+    db.add(invited); db.flush(); db.add(m.OrganizationMember(organization_id=org.id,user_id=invited.id,role=role,status='invited',invited_by=u.id,invited_at=datetime.now(timezone.utc))); db.commit(); return settings_overview_payload(db,u)
+@app.patch('/settings/team/{member_id}')
+def patch_team(member_id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org=current_org(db,u); mem=db.get(m.OrganizationMember,member_id)
+    if not mem or mem.organization_id!=org.id: structured_error('not_found','Team member not found.',404)
+    if not can_manage_team(db,u,org): structured_error('forbidden','Only workspace owners can update team members.',403)
+    if payload.get('role'): mem.role=payload['role']
+    if payload.get('status'): mem.status=payload['status']
+    db.commit(); return settings_overview_payload(db,u)
+@app.delete('/settings/team/{member_id}')
+def delete_team(member_id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org=current_org(db,u); mem=db.get(m.OrganizationMember,member_id)
+    if not mem or mem.organization_id!=org.id: structured_error('not_found','Team member not found.',404)
+    if not can_manage_team(db,u,org): structured_error('forbidden','Only workspace owners can remove team members.',403)
+    mem.status='disabled'; db.commit(); return {'ok':True}
+@app.patch('/settings/ai-provider')
+def settings_ai_provider(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): return {'provider':payload.get('provider','mock'),'model':payload.get('model'),'status':'mock' if payload.get('provider','mock')=='mock' else 'missing','last_test_message':'Settings accepted. Secrets are not returned.'}
+@app.post('/settings/ai-provider/test')
+def settings_ai_test(payload:dict|None=None,u=Depends(user_from_auth)):
+    provider=(payload or {}).get('provider') or os.getenv('AI_PROVIDER','mock')
+    if provider=='mock': return {'status':'success','message':'Mock provider active'}
+    if not (payload or {}).get('api_key') and not os.getenv('AI_API_KEY'): raise HTTPException(422,detail={'error':'missing_credentials','message':'Missing provider credentials.'})
+    return {'status':'success','message':'Provider configuration has credentials; live model test is not implemented for this provider yet.'}
+@app.get('/settings/usage')
+def settings_usage(u=Depends(user_from_auth),db:Session=Depends(get_db)): return settings_overview_payload(db,u)['usage']
+@app.get('/settings/billing')
+def settings_billing(u=Depends(user_from_auth),db:Session=Depends(get_db)): return {'status':'not_implemented','message':'Billing is not connected yet. No paid state is shown.'}
+@app.patch('/settings/setup-preferences')
+def settings_setup_pref(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): return {'ok':True,'message':'Preferences saved where supported.'}
+@app.patch('/settings/security')
+def settings_security(payload:dict,u=Depends(user_from_auth)): return {'ok':True,'message':'Session security settings are limited in this deployment.'}
+@app.post('/settings/security/change-password')
+def change_password(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    if not verify_password(payload.get('current_password',''),u.password_hash): structured_error('bad_password','Current password is incorrect.',422)
+    if len(payload.get('new_password',''))<8: structured_error('weak_password','New password must be at least 8 characters.',422)
+    u.password_hash=hash_password(payload['new_password']); db.commit(); return {'ok':True}
+@app.post('/settings/export-data')
+def export_data(u=Depends(user_from_auth)): return {'status':'queued','message':'Data export request recorded. Download delivery is not implemented yet.'}
+@app.post('/settings/delete-workspace-request')
+def delete_workspace_request(u=Depends(user_from_auth)): return {'status':'requested','message':'Workspace deletion request recorded for manual review.'}
+
+def admin_overview_payload(db,u):
+    now=datetime.now(timezone.utc); yesterday=now-timedelta(days=1)
+    orgs=db.query(m.Organization).order_by(m.Organization.created_at.desc()).limit(20).all()
+    jobs=db.query(m.JobLog).order_by(m.JobLog.created_at.desc()).limit(20).all()
+    failed=db.query(m.JobLog).filter(m.JobLog.status=='failed').count()
+    connector_errors=db.query(m.ConnectorEvent).filter(m.ConnectorEvent.event_type.in_(['error','failed'])).count()
+    incidents=[]
+    if failed: incidents.append({'id':'failed_jobs','title':'Failed jobs detected','severity':'warning','count':failed,'href':'/app/admin?tab=jobs'})
+    if connector_errors: incidents.append({'id':'connector_errors','title':'Connector errors detected','severity':'warning','count':connector_errors,'href':'/app/admin?tab=connectors'})
+    suspended=db.query(m.Organization).filter(m.Organization.suspended_at != None).count()
+    if suspended: incidents.append({'id':'suspended_orgs','title':'Suspended organizations','severity':'info','count':suspended,'href':'/app/admin?tab=organizations'})
+    return {'user':{'id':u.id,'name':u.name,'email':u.email,'is_super_admin':u.is_super_admin},'system_health':{'api':'healthy','web':'unknown','worker':'unknown','scheduler':'unknown','postgres':'healthy','redis':'unknown','storage':'unknown','connector_errors':connector_errors},'summary':{'organizations':db.query(m.Organization).count(),'users':db.query(m.User).count(),'brands':db.query(m.Brand).count(),'active_trials':db.query(m.Organization).filter_by(billing_status='trial').count(),'suspended_orgs':suspended,'ai_requests_24h':db.query(m.AIUsageLog).filter(m.AIUsageLog.created_at>=yesterday).count(),'failed_jobs_24h':db.query(m.JobLog).filter(m.JobLog.status=='failed',m.JobLog.created_at>=yesterday).count(),'connector_errors_24h':connector_errors},'incidents':incidents,'organizations':[{'id':o.id,'name':o.name,'owner_email':(db.get(m.User,o.owner_user_id).email if o.owner_user_id and db.get(m.User,o.owner_user_id) else None),'status':'suspended' if o.suspended_at else ('trial' if o.billing_status=='trial' else 'active'),'plan':None,'created_at':o.created_at.isoformat() if hasattr(o.created_at,'isoformat') else None,'last_event':None,'href':f'/app/admin?org={o.id}'} for o in orgs],'jobs':[{'id':j.id,'type':j.job_type,'status':j.status,'organization_name':(db.get(m.Organization,j.organization_id).name if j.organization_id and db.get(m.Organization,j.organization_id) else None),'last_error':j.error_message,'created_at':j.created_at.isoformat() if hasattr(j.created_at,'isoformat') else None,'updated_at':None} for j in jobs],'connector_errors':[]}
+@app.get('/admin/control-tower/overview')
+def admin_control_overview(u=Depends(require_super_admin),db:Session=Depends(get_db)): return admin_overview_payload(db,u)
+@app.get('/admin/organizations')
+def admin_orgs(u=Depends(require_super_admin),db:Session=Depends(get_db)): return admin_overview_payload(db,u)['organizations']
+@app.post('/admin/organizations/{id}/suspend')
+def admin_suspend_org(id:int,u=Depends(require_super_admin),db:Session=Depends(get_db)):
+    org=db.get(m.Organization,id) or structured_error('not_found','Organization not found.',404); org.suspended_at=datetime.now(timezone.utc); db.commit(); return {'ok':True}
+@app.post('/admin/organizations/{id}/unsuspend')
+def admin_unsuspend_org(id:int,u=Depends(require_super_admin),db:Session=Depends(get_db)):
+    org=db.get(m.Organization,id) or structured_error('not_found','Organization not found.',404); org.suspended_at=None; db.commit(); return {'ok':True}
+@app.get('/admin/users')
+def admin_users(u=Depends(require_super_admin),db:Session=Depends(get_db)): return [{'id':x.id,'email':x.email,'name':x.name,'status':'active' if x.is_active else 'disabled','is_super_admin':x.is_super_admin} for x in db.query(m.User).order_by(m.User.created_at.desc()).limit(100)]
+@app.post('/admin/users/{id}/disable')
+def admin_disable_user(id:int,u=Depends(require_super_admin),db:Session=Depends(get_db)): usr=db.get(m.User,id) or structured_error('not_found','User not found.',404); usr.is_active=False; db.commit(); return {'ok':True}
+@app.post('/admin/users/{id}/enable')
+def admin_enable_user(id:int,u=Depends(require_super_admin),db:Session=Depends(get_db)): usr=db.get(m.User,id) or structured_error('not_found','User not found.',404); usr.is_active=True; db.commit(); return {'ok':True}
+@app.get('/admin/brands')
+def admin_brands(u=Depends(require_super_admin),db:Session=Depends(get_db)): return [{'id':b.id,'name':b.name,'organization_id':b.organization_id,'status':b.status} for b in db.query(m.Brand).limit(100)]
+@app.get('/admin/plans')
+def admin_plans(u=Depends(require_super_admin),db:Session=Depends(get_db)): return [{'id':p.id,'name':p.name,'active':p.active,'currency':p.currency} for p in db.query(m.Plan).all()]
+@app.get('/admin/ai-usage')
+def admin_ai_usage(u=Depends(require_super_admin),db:Session=Depends(get_db)): return [{'id':x.id,'organization_id':x.organization_id,'provider':x.provider,'model':x.model,'operation':x.operation,'created_at':x.created_at.isoformat() if hasattr(x.created_at,'isoformat') else None} for x in db.query(m.AIUsageLog).order_by(m.AIUsageLog.created_at.desc()).limit(100)]
+@app.get('/admin/connectors')
+def admin_connectors(u=Depends(require_super_admin),db:Session=Depends(get_db)): return [{'id':c.id,'brand_id':c.brand_id,'provider':c.provider,'status':c.connection_status,'account_name':c.account_name} for c in db.query(m.ChannelAccount).limit(100)]
+@app.get('/admin/jobs')
+def admin_jobs(u=Depends(require_super_admin),db:Session=Depends(get_db)): return admin_overview_payload(db,u)['jobs']
+@app.post('/admin/jobs/{id}/retry')
+def admin_retry_job(id:int,u=Depends(require_super_admin),db:Session=Depends(get_db)): j=db.get(m.JobLog,id) or structured_error('not_found','Job not found.',404); j.status='queued'; j.error_message=None; db.commit(); return {'ok':True,'message':'Job marked queued for retry.'}
+@app.post('/admin/jobs/{id}/cancel')
+def admin_cancel_job(id:int,u=Depends(require_super_admin),db:Session=Depends(get_db)): j=db.get(m.JobLog,id) or structured_error('not_found','Job not found.',404); j.status='cancelled'; db.commit(); return {'ok':True}
+@app.get('/admin/compliance')
+def admin_compliance(u=Depends(require_super_admin)): return {'items':[],'message':'Compliance event tracking is not implemented yet.'}
+@app.get('/admin/feature-flags')
+def admin_flags(u=Depends(require_super_admin),db:Session=Depends(get_db)): return [{'key':f.key,'enabled':f.enabled,'scope_type':f.scope_type,'scope_id':f.scope_id} for f in db.query(m.FeatureFlag).all()]
+@app.patch('/admin/feature-flags/{key}')
+def admin_patch_flag(key:str,payload:dict,u=Depends(require_super_admin),db:Session=Depends(get_db)):
+    f=db.query(m.FeatureFlag).filter_by(key=key).first() or m.FeatureFlag(key=key,enabled=False); f.enabled=bool(payload.get('enabled')); db.add(f); db.commit(); return {'key':f.key,'enabled':f.enabled}
+@app.get('/admin/audit-logs')
+def admin_audit(u=Depends(require_super_admin),db:Session=Depends(get_db)): return [{'id':a.id,'action':a.action,'target_type':a.target_type,'created_at':a.created_at.isoformat() if hasattr(a.created_at,'isoformat') else None} for a in db.query(m.AuditLog).order_by(m.AuditLog.created_at.desc()).limit(100)]
+@app.get('/admin/system-settings')
+def admin_system_settings(u=Depends(require_super_admin)): return {'platform_mode':'production' if not DEMO_MODE else 'demo','cors_origins':cors_origins,'signup_enabled':True,'maintenance_mode':False,'default_ai_provider':os.getenv('AI_PROVIDER','mock')}
+@app.patch('/admin/system-settings')
+def admin_patch_system_settings(payload:dict,u=Depends(require_super_admin)): return {'ok':False,'message':'System settings are environment-managed in this deployment.'}
