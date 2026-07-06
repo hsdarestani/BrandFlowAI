@@ -1,16 +1,17 @@
 export type ApiOptions = RequestInit & { mockFallback?: unknown; authenticated?: boolean };
-const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const baseUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '');
 export class ApiError extends Error{status:number;detail:any;constructor(status:number,message:string,detail?:any){super(message);this.status=status;this.detail=detail}}
 export const TOKEN_KEY='smarbiz_token';
+export const SESSION_MESSAGE_KEY='smarbiz_session_message';
 function browser(){return typeof window !== 'undefined'}
 function currentLocale(){if(!browser())return 'en';return location.pathname.split('/').filter(Boolean)[0]||'en'}
 export function getToken(){ if (!browser()) return ''; return localStorage.getItem(TOKEN_KEY) || ''; }
-export function clearSession(){ if(browser()){localStorage.removeItem(TOKEN_KEY);localStorage.setItem('smarbiz_session_message','Session expired. Please log in again.')}}
+export function clearSession(){ if(browser()){localStorage.removeItem(TOKEN_KEY);localStorage.setItem(SESSION_MESSAGE_KEY,'Session expired. Please log in again.')}}
 export function redirectToLogin(){ if(browser()){const l=currentLocale(); if(!location.pathname.includes('/auth/login')) location.href=`/${l}/auth/login`;}}
 async function request<T>(path:string, options:ApiOptions={}){
   const isForm=typeof FormData!=='undefined' && options.body instanceof FormData;
   const jwt=getToken();
-  const headers:any={...(isForm?{}:{'Content-Type':'application/json'}),...(jwt?{Authorization:`Bearer ${jwt}`}:{ }),...(options.headers||{})};
+  const headers:HeadersInit={...(isForm?{}:{'Content-Type':'application/json'}),...(jwt?{Authorization:`Bearer ${jwt}`}:{ }),...(options.headers||{})};
   try{
     const res=await fetch(`${baseUrl}${path}`,{...options,headers});
     if(res.status===401){clearSession(); redirectToLogin(); throw new ApiError(401,'Session expired. Please log in again.');}
