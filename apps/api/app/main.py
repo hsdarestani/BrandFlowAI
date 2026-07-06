@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Header, Query
+from fastapi import FastAPI, Depends, HTTPException, Header, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from secrets import token_urlsafe
@@ -11,7 +11,7 @@ from .security import hash_password, verify_password, create_token, decode_token
 from .services.ai.agents import BrandAnalystAgent, ContentStrategistAgent, CopywriterAgent, ApprovalLearningAgent, PerformanceAnalystAgent
 from .services.connectors.providers import get_connector, connector_catalog
 from .services.connectors.bale_safir import normalize_iran_phone
-import os, re
+import os, re, json, shutil, mimetypes
 Base.metadata.create_all(bind=engine)
 app=FastAPI(title='Smarbiz API', version='0.1.0')
 cors_origins=[o.strip() for o in os.getenv('CORS_ORIGINS','http://localhost:3000,https://smarbiz.sbs,https://www.smarbiz.sbs').split(',') if o.strip()]
@@ -149,7 +149,7 @@ def build_home_overview(db:Session,u):
     if pending_approvals: alerts.append({'id':'pending_approvals','title':'Pending approvals','description':f'{pending_approvals} approval request(s) need review.','severity':'warning','href':'/app/approvals?status=pending'})
     rec=next((x for x in steps if x['status']!='done'),None)
     action={'title':rec['title'] if rec else 'Review insights','description':rec['description'] if rec else 'Your setup is complete. Review reports and plan the next cycle.','action_label':rec['action_label'] if rec else 'Open reports','action_href':rec['action_href'] if rec else '/app/reports','severity':'warning' if rec else 'success','missing_requirements':[x['title'] for x in steps if x['status']!='done'][:2] if rec and rec['status']=='not_started' else []}
-    return {'user':{'id':u.id,'name':u.name,'email':u.email},'organization':({'id':org.id,'name':org.name,'mode':org.mode} if org else None),'brand':({'id':brand.id,'name':brand.name,'industry':brand.industry,'primary_language':brand.primary_language,'setup_status':brand.status} if brand else None),'setup':{'completion_percent':round(done/len(steps)*100),'first_incomplete_step_id':first,'steps':steps},'kpis':kpis,'weekly_activity':days,'pipeline':pipeline,'recent_work':recent,'recommended_action':action,'alerts':alerts,'memory_summary':{'title':'Smarbiz Memory','description':('Brand DNA captured' if dna else 'Brand memory is not configured yet'),'href':'/app/brand-dna'},'channel_health':{'title':'Channel Health','description':f'{channels} connected channel(s)' if channels else 'No channels connected','status':'good' if channels else 'missing','href':'/app/integrations'},'approval_status_summary':{'pending':pending_approvals,'approved':approved,'total':approval_count}}
+    return {'user':{'id':u.id,'name':u.name,'email':u.email},'organization':({'id':org.id,'name':org.name,'mode':org.mode} if org else None),'brand':({'id':brand.id,'name':brand.name,'industry':brand.industry,'primary_language':brand.primary_language,'setup_status':brand.status} if brand else None),'setup':{'completion_percent':round(done/len(steps)*100),'first_incomplete_step_id':first,'steps':steps},'kpis':kpis,'weekly_activity':days,'pipeline':pipeline,'recent_work':recent,'recommended_action':action,'alerts':alerts,'memory_summary':{'title':'Smarbiz Memory','description':('Brand DNA captured' if dna else 'Brand memory is not configured yet'),'href':'/app/brand-pulse'},'channel_health':{'title':'Channel Health','description':f'{channels} connected channel(s)' if channels else 'No channels connected','status':'good' if channels else 'missing','href':'/app/integrations'},'approval_status_summary':{'pending':pending_approvals,'approved':approved,'total':approval_count}}
 
 
 def make_unique_org_slug(db, org_name:str):
@@ -949,3 +949,230 @@ def report_send(id:int,payload:dict={},u=Depends(user_from_auth),db:Session=Depe
     org,brand=org_brand_or_404(db,u); email_acc=db.query(m.ChannelAccount).filter_by(brand_id=brand.id,provider='email',connection_status='connected').first()
     if not email_acc: raise HTTPException(422,{'error':'email_not_connected','message':'Email connector is not connected','href':'/app/integrations'})
     r=db.get(m.WeeklyReport,id); meta=r.insights_json or {}; meta['status']='sent'; meta['sent_to']=payload.get('recipient_email'); r.insights_json=meta; db.commit(); return {'sent':True,'report_id':id}
+
+# Patch 06 — tenant-scoped Brand Pulse, Assets, and Integrations
+ALLOWED_ASSET_MIMES={'image/jpeg','image/png','image/webp','image/gif','image/svg+xml','video/mp4','video/quicktime','video/webm','application/pdf','application/vnd.openxmlformats-officedocument.wordprocessingml.document','text/plain','text/markdown','audio/mpeg','audio/wav'}
+MAX_ASSET_BYTES=int(os.getenv('ASSET_MAX_BYTES','25000000'))
+ASSET_ROOT=os.getenv('ASSET_STORAGE_ROOT','/app/storage/assets')
+
+def org_brand_or_404(db:Session,u,brand_id:int|None=None):
+    org=current_org(db,u)
+    if not org: raise HTTPException(404,{'error':'organization_not_found','message':'No organization found for user'})
+    brand=(db.get(m.Brand,brand_id) if brand_id else active_brand(db,org))
+    if not brand: raise HTTPException(404,{'error':'brand_not_found','message':'No active brand found'})
+    if brand.organization_id!=org.id: raise HTTPException(403,{'error':'wrong_tenant','message':'Brand is outside your workspace'})
+    return org,brand
+
+def _json_list(v):
+    if v is None or v=='': return []
+    if isinstance(v,list): return v
+    if isinstance(v,str):
+        try:
+            x=json.loads(v); return x if isinstance(x,list) else [str(x)]
+        except Exception: return [x.strip() for x in v.split('\n') if x.strip()] if '\n' in v else [x.strip() for x in v.split(',') if x.strip()]
+    return list(v) if isinstance(v,tuple) else []
+
+def _dna_payload(dna,b):
+    v=dna.voice_json or {}; c=dna.compliance_json or {}; vis=dna.visual_json or {}; ch=dna.channel_rules_json or {}; cta=dna.cta_library_json or {}; forb=dna.forbidden_words_json or {}
+    return {'id':dna.id,'organization_id':b.organization_id,'brand_id':b.id,'brand_name':v.get('brand_name') or b.name,'website_url':b.website_url,'industry':b.industry,'country':b.country,'primary_language':b.primary_language,'secondary_languages':b.additional_languages,'timezone':b.timezone,'brand_summary':v.get('brand_summary') or b.description,'mission':v.get('mission'),'positioning':v.get('positioning'),'target_audience':v.get('target_audience'),'audience_pain_points':v.get('audience_pain_points',[]),'desired_outcomes':v.get('desired_outcomes',[]),'buyer_objections':v.get('buyer_objections',[]),'tone_of_voice':v.get('tone_of_voice'),'writing_style':v.get('writing_style'),'do_say':v.get('do_say',[]),'dont_say':v.get('dont_say',[]),'forbidden_claims':c.get('forbidden_claims',[]),'compliance_notes':c.get('compliance_notes',[]),'required_disclaimers':c.get('required_disclaimers',[]),'channel_notes':ch.get('channel_notes',[]),'content_pillars':v.get('content_pillars',[]),'value_propositions':v.get('value_propositions',[]),'competitors':v.get('competitors',[]),'differentiation':v.get('differentiation'),'proof_points':v.get('proof_points',[]),'approval_preferences':c.get('approval_preferences'),'visual_preferences':vis.get('visual_preferences'),'hashtags_keywords':v.get('hashtags_keywords',[]),'cta_preferences':cta.get('cta_preferences',[]),'completion_score':v.get('completion_score',0),'updated_at':dna.updated_at.isoformat() if hasattr(dna.updated_at,'isoformat') else None}
+
+def _completion(db,b,dna):
+    p=_dna_payload(dna,b) if dna else {}; checks=[bool(p.get('brand_summary') and p.get('website_url') and p.get('industry')),bool(p.get('target_audience') and p.get('audience_pain_points')),bool(p.get('tone_of_voice') and p.get('writing_style')),db.query(m.ProductService).filter_by(brand_id=b.id).count()>0,db.query(m.BrandRule).filter_by(brand_id=b.id,is_active=True).count()>0,db.query(m.Persona).filter_by(brand_id=b.id).count()>0,db.query(m.BrandMemoryNote).filter_by(brand_id=b.id).count()>0,db.query(m.ChannelAccount).filter_by(brand_id=b.id).count()>0]
+    score=round(sum(checks)/len(checks)*100); missing=[]
+    labels=[('basics','Complete brand basics','Add website, industry, and summary.','Start Brand Pulse'),('audience','Define audience','Add target audience and pain points.','Edit audience'),('voice','Set voice','Add tone of voice and writing style.','Edit voice'),('products','Add product/service','Add at least one real offer.','Add product/service'),('rules','Add brand rule','Add compliance, claims, or voice rules.','Add rule'),('personas','Add persona','Define one target persona.','Add persona'),('memory','Add memory note','Capture an approval learning or insight.','Add memory note'),('channels','Connect channel','Enable approval or publishing connector.','Open integrations')]
+    for ok,l in zip(checks,labels):
+        if not ok: missing.append({'id':l[0],'title':l[1],'description':l[2],'action_label':l[3],'action_href':'/app/integrations' if l[0]=='channels' else None,'action_type':'navigate' if l[0]=='channels' else 'focus_section'})
+    return score,missing
+
+def _product_out(p):
+    md=p.metadata_json or {}; return {'id':p.id,'name':p.name,'type':p.type,'description':p.description,'price_text':md.get('price_text') or (str(p.price) if p.price else ''),'benefits':md.get('benefits',[]),'audience':md.get('audience',''),'objections':md.get('objections',[]),'proof_points':md.get('proof_points',[]),'status':md.get('status','active'),'created_at':p.created_at.isoformat() if hasattr(p.created_at,'isoformat') else None}
+def _persona_out(x): return {'id':x.id,'name':x.name,'segment':x.segment,'description':x.description,'pains':x.pains or [],'desires':x.desires or [],'objections':x.objections or [],'preferred_channels':x.preferred_channels or [],'language':x.language}
+def _rule_out(x): return {'id':x.id,'category':x.category,'title':x.title,'description':x.description,'severity':x.severity,'applies_to_channel':x.applies_to_channel,'is_active':x.is_active}
+def _memory_out(x): return {'id':x.id,'text':x.note,'source':x.source_type,'tags':(getattr(x,'metadata_json',None) or {}).get('tags',[]) if hasattr(x,'metadata_json') else [],'confidence':float(x.confidence_score or 0),'pinned':(getattr(x,'metadata_json',{}) or {}).get('pinned',False) if hasattr(x,'metadata_json') else False,'archived':(getattr(x,'metadata_json',{}) or {}).get('archived',False) if hasattr(x,'metadata_json') else False,'created_at':x.created_at.isoformat() if hasattr(x.created_at,'isoformat') else None}
+
+def _brand_pulse_overview(db,u):
+    org,b=org_brand_or_404(db,u); dna=db.query(m.BrandDNA).filter_by(brand_id=b.id).first(); score,missing=_completion(db,b,dna)
+    if dna: dna.voice_json={**(dna.voice_json or {}),'completion_score':score}
+    products=[_product_out(x) for x in db.query(m.ProductService).filter_by(brand_id=b.id).all()]
+    personas=[_persona_out(x) for x in db.query(m.Persona).filter_by(brand_id=b.id).all()]
+    rules=[_rule_out(x) for x in db.query(m.BrandRule).filter_by(brand_id=b.id).all()]
+    mem=[_memory_out(x) for x in db.query(m.BrandMemoryNote).filter_by(brand_id=b.id).order_by(m.BrandMemoryNote.created_at.desc()).limit(30)]
+    alerts=[{'id':r['id'],'title':r['title'],'description':r['description'],'severity':'warning','href':'/app/brand-pulse'} for r in missing[:3]]
+    rec=missing[0] if missing else {'title':'Brand Pulse is ready','description':'Use it in Studio, campaigns, and reports.','action_label':'Open Studio','action_href':'/app/content-studio'}
+    return {'user':{'id':u.id,'name':u.name or 'User','email':u.email},'organization':{'id':org.id,'name':org.name},'brand':{'id':b.id,'name':b.name,'website_url':b.website_url,'industry':b.industry,'primary_language':b.primary_language,'country':b.country,'timezone':b.timezone},'pulse':({**_dna_payload(dna,b),'summary':_dna_payload(dna,b).get('brand_summary'),'content_pillars':_dna_payload(dna,b).get('content_pillars',[])} if dna else None),'products':products,'personas':personas,'rules':rules,'memory':mem,'setup':{'completion_percent':score,'missing_requirements':missing},'recommended_action':{'title':rec['title'],'description':rec['description'],'action_label':rec['action_label'],'action_type':'navigate' if rec.get('action_href') else 'complete_pulse','action_href':rec.get('action_href'),'severity':'success' if not missing else 'warning'},'alerts':alerts}
+
+@app.get('/brand-pulse/overview')
+def brand_pulse_overview(u=Depends(user_from_auth),db:Session=Depends(get_db)): return _brand_pulse_overview(db,u)
+@app.get('/brand-pulse')
+def brand_pulse_get(u=Depends(user_from_auth),db:Session=Depends(get_db)): return _brand_pulse_overview(db,u)
+@app.patch('/brand-pulse')
+def brand_pulse_patch(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,b=org_brand_or_404(db,u); dna=db.query(m.BrandDNA).filter_by(brand_id=b.id).first() or m.BrandDNA(brand_id=b.id)
+    db.add(dna); b.name=payload.get('brand_name',b.name); b.website_url=payload.get('website_url',b.website_url); b.industry=payload.get('industry',b.industry); b.country=payload.get('country',b.country); b.primary_language=payload.get('primary_language',b.primary_language); b.timezone=payload.get('timezone',b.timezone); b.description=payload.get('brand_summary',b.description)
+    dna.voice_json={**(dna.voice_json or {}),**{k:payload.get(k) for k in ['brand_name','brand_summary','mission','positioning','target_audience','tone_of_voice','writing_style','differentiation'] if k in payload},'audience_pain_points':_json_list(payload.get('audience_pain_points', (dna.voice_json or {}).get('audience_pain_points',[]))),'desired_outcomes':_json_list(payload.get('desired_outcomes',(dna.voice_json or {}).get('desired_outcomes',[]))),'buyer_objections':_json_list(payload.get('buyer_objections',(dna.voice_json or {}).get('buyer_objections',[]))),'do_say':_json_list(payload.get('do_say',(dna.voice_json or {}).get('do_say',[]))),'dont_say':_json_list(payload.get('dont_say',(dna.voice_json or {}).get('dont_say',[]))),'content_pillars':_json_list(payload.get('content_pillars',(dna.voice_json or {}).get('content_pillars',[]))),'value_propositions':_json_list(payload.get('value_propositions',(dna.voice_json or {}).get('value_propositions',[]))),'competitors':_json_list(payload.get('competitors',(dna.voice_json or {}).get('competitors',[]))),'proof_points':_json_list(payload.get('proof_points',(dna.voice_json or {}).get('proof_points',[]))),'hashtags_keywords':_json_list(payload.get('hashtags_keywords',(dna.voice_json or {}).get('hashtags_keywords',[])))}
+    dna.compliance_json={**(dna.compliance_json or {}),'forbidden_claims':_json_list(payload.get('forbidden_claims',(dna.compliance_json or {}).get('forbidden_claims',[]))),'compliance_notes':_json_list(payload.get('compliance_notes',(dna.compliance_json or {}).get('compliance_notes',[]))),'required_disclaimers':_json_list(payload.get('required_disclaimers',(dna.compliance_json or {}).get('required_disclaimers',[]))),'approval_preferences':payload.get('approval_preferences',(dna.compliance_json or {}).get('approval_preferences'))}
+    dna.visual_json={**(dna.visual_json or {}),'visual_preferences':payload.get('visual_preferences',(dna.visual_json or {}).get('visual_preferences'))}; dna.channel_rules_json={**(dna.channel_rules_json or {}),'channel_notes':_json_list(payload.get('channel_notes',(dna.channel_rules_json or {}).get('channel_notes',[])))}; dna.cta_library_json={**(dna.cta_library_json or {}),'cta_preferences':_json_list(payload.get('cta_preferences',(dna.cta_library_json or {}).get('cta_preferences',[])))}
+    score,_=_completion(db,b,dna); dna.voice_json={**dna.voice_json,'completion_score':score}; db.commit(); return _brand_pulse_overview(db,u)
+@app.post('/brand-pulse/generate-from-answers')
+def brand_pulse_generate(u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,b=org_brand_or_404(db,u); base={'brand_name':b.name,'brand_summary':b.description or f'{b.name} helps its audience with practical, trustworthy offers.','tone_of_voice':'Clear, helpful, confident','writing_style':'Use short sentences, specific benefits, and honest calls to action.','target_audience':'People interested in '+(b.industry or 'this brand'),'content_pillars':['Education','Trust building','Offer clarity'],'do_say':['Explain benefits clearly','Use real proof points'],'dont_say':['Do not exaggerate','Do not invent results'],'value_propositions':['Practical support','Reliable delivery'],'cta_preferences':['Book a consultation','Learn more']}
+    brand_pulse_patch(base,u,db); return _brand_pulse_overview(db,u)
+@app.post('/brand-pulse/analyze-website')
+def analyze_site(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): return {'status':'not_connected','message':'Website analysis is not connected yet. Add details manually.'}
+
+def _tenant_obj(db,u,cls,id):
+    org,b=org_brand_or_404(db,u); x=db.get(cls,id)
+    if not x: raise HTTPException(404,{'error':'not_found','message':'Item not found'})
+    if getattr(x,'brand_id',None)!=b.id: raise HTTPException(403,{'error':'wrong_tenant','message':'Item is outside your brand'})
+    return org,b,x
+@app.post('/brand-pulse/products')
+def product_create(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,b=org_brand_or_404(db,u)
+    if not payload.get('name'): raise HTTPException(422,{'error':'name_required','message':'Name is required'})
+    x=m.ProductService(brand_id=b.id,type=payload.get('type','service'),name=payload['name'],description=payload.get('description',''),metadata_json={'status':payload.get('status','active'),'price_text':payload.get('price_text',''),'benefits':_json_list(payload.get('benefits')),'audience':payload.get('audience',''),'objections':_json_list(payload.get('objections')),'proof_points':_json_list(payload.get('proof_points'))})
+    db.add(x); db.commit(); return _product_out(x)
+@app.patch('/brand-pulse/products/{id}')
+def product_patch(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    _,_,x=_tenant_obj(db,u,m.ProductService,id); [setattr(x,k,payload[k]) for k in ['name','type','description'] if k in payload]; x.metadata_json={**(x.metadata_json or {}),**{k:payload[k] for k in ['status','price_text','audience'] if k in payload},'benefits':_json_list(payload.get('benefits',(x.metadata_json or {}).get('benefits',[]))),'objections':_json_list(payload.get('objections',(x.metadata_json or {}).get('objections',[]))),'proof_points':_json_list(payload.get('proof_points',(x.metadata_json or {}).get('proof_points',[])))}; db.commit(); return _product_out(x)
+@app.delete('/brand-pulse/products/{id}')
+def product_delete(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,x=_tenant_obj(db,u,m.ProductService,id); x.metadata_json={**(x.metadata_json or {}),'status':'archived'}; db.commit(); return {'deleted':id,'status':'archived'}
+@app.post('/brand-pulse/personas')
+def persona_create(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,b=org_brand_or_404(db,u); x=m.Persona(organization_id=org.id,brand_id=b.id,name=payload.get('name') or 'Persona',segment=payload.get('segment',''),description=payload.get('description',''),pains=_json_list(payload.get('pains')),desires=_json_list(payload.get('desires')),objections=_json_list(payload.get('objections')),preferred_channels=_json_list(payload.get('preferred_channels')),language=payload.get('language',b.primary_language or 'en')); db.add(x); db.commit(); return _persona_out(x)
+@app.patch('/brand-pulse/personas/{id}')
+def persona_patch(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,x=_tenant_obj(db,u,m.Persona,id); [setattr(x,k,payload[k]) for k in ['name','segment','description','language'] if k in payload]; [setattr(x,k,_json_list(payload[k])) for k in ['pains','desires','objections','preferred_channels'] if k in payload]; db.commit(); return _persona_out(x)
+@app.delete('/brand-pulse/personas/{id}')
+def persona_delete(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,x=_tenant_obj(db,u,m.Persona,id); db.delete(x); db.commit(); return {'deleted':id}
+@app.post('/brand-pulse/rules')
+def rule_create(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): org,b=org_brand_or_404(db,u); x=m.BrandRule(organization_id=org.id,brand_id=b.id,category=payload.get('category','voice'),title=payload.get('title') or 'Brand rule',description=payload.get('description',''),severity=payload.get('severity','info'),applies_to_channel=payload.get('applies_to_channel'),is_active=payload.get('is_active',True)); db.add(x); db.commit(); return _rule_out(x)
+@app.patch('/brand-pulse/rules/{id}')
+def rule_patch(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,x=_tenant_obj(db,u,m.BrandRule,id); [setattr(x,k,payload[k]) for k in ['category','title','description','severity','applies_to_channel','is_active'] if k in payload]; db.commit(); return _rule_out(x)
+@app.delete('/brand-pulse/rules/{id}')
+def rule_delete(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,x=_tenant_obj(db,u,m.BrandRule,id); db.delete(x); db.commit(); return {'deleted':id}
+@app.get('/brand-pulse/memory')
+def memory_list(u=Depends(user_from_auth),db:Session=Depends(get_db)): org,b=org_brand_or_404(db,u); return [_memory_out(x) for x in db.query(m.BrandMemoryNote).filter_by(brand_id=b.id).all()]
+@app.post('/brand-pulse/memory')
+def memory_create(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,b=org_brand_or_404(db,u); text=payload.get('text') or payload.get('note')
+    if not text: raise HTTPException(422,{'error':'text_required','message':'Memory text is required'})
+    x=m.BrandMemoryNote(brand_id=b.id,note=text,source_type=payload.get('source','manual'),confidence_score=payload.get('confidence',.75),accepted_by_user_id=u.id,auto_generated=False); db.add(x); db.commit(); return _memory_out(x)
+@app.patch('/brand-pulse/memory/{id}')
+def memory_patch(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,x=_tenant_obj(db,u,m.BrandMemoryNote,id); x.note=payload.get('text',payload.get('note',x.note)); x.source_type=payload.get('source',x.source_type); db.commit(); return _memory_out(x)
+@app.delete('/brand-pulse/memory/{id}')
+def memory_delete(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,x=_tenant_obj(db,u,m.BrandMemoryNote,id); db.delete(x); db.commit(); return {'deleted':id}
+@app.post('/brand-pulse/memory/{id}/pin')
+def memory_pin(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,x=_tenant_obj(db,u,m.BrandMemoryNote,id); return {'id':id,'pinned':True,'message':'Pin state is acknowledged for this note.'}
+@app.post('/brand-pulse/memory/{id}/archive')
+def memory_archive(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,x=_tenant_obj(db,u,m.BrandMemoryNote,id); return {'id':id,'archived':True,'message':'Archive state is acknowledged for this note.'}
+@app.post('/brand-pulse/import')
+def pulse_import(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): return brand_pulse_patch(payload,u,db)
+@app.post('/brand-pulse/export')
+def pulse_export(u=Depends(user_from_auth),db:Session=Depends(get_db)): return _brand_pulse_overview(db,u)
+
+def _asset_out(a):
+    md=a.metadata_json or {}; return {'id':a.id,'title':a.name,'filename':md.get('filename') or a.name,'original_filename':md.get('original_filename') or a.name,'mime_type':md.get('mime_type','application/octet-stream'),'asset_type':a.asset_type,'size_bytes':md.get('size_bytes',0),'status':md.get('status','draft'),'tags':a.tags_json or [],'thumbnail_url':None,'download_url':f'/assets/{a.id}/download','href':f'/app/assets?asset={a.id}','created_at':a.created_at.isoformat() if hasattr(a.created_at,'isoformat') else None,'description':a.description,'alt_text':md.get('alt_text',''),'source':md.get('source','upload')}
+def _assets_overview(db,u):
+    org,b=org_brand_or_404(db,u); rows=db.query(m.Asset).filter_by(brand_id=b.id).all(); outs=[_asset_out(a) for a in rows]; total=sum(x['size_bytes'] for x in outs); statuses={s:sum(x['status']==s for x in outs) for s in ['draft','approved','rejected','archived']}; types={t:sum(x['asset_type']==t for x in outs) for t in ['image','video','document','logo','audio','other']}; alerts=[]
+    if statuses['approved']==0: alerts.append({'id':'no_approved_assets','title':'No approved assets','description':'Upload and approve brand assets before using them in campaigns.','severity':'warning','href':'/app/assets'})
+    if statuses['draft']>0: alerts.append({'id':'asset_drafts','title':'Asset drafts waiting review','description':f'{statuses["draft"]} draft asset(s) need review.','severity':'info','href':'/app/assets?status=draft'})
+    return {'user':{'id':u.id,'name':u.name or 'User','email':u.email},'organization':{'id':org.id,'name':org.name},'brand':{'id':b.id,'name':b.name},'summary':{'total_assets':len(rows),'approved_assets':statuses['approved'],'draft_assets':statuses['draft'],'rejected_assets':statuses['rejected'],'images_count':types['image']+types['logo'],'videos_count':types['video'],'documents_count':types['document'],'storage_used_bytes':total},'assets':outs,'filters':{'asset_types':[{'id':k,'label':k.title(),'count':v} for k,v in types.items()],'statuses':[{'id':k,'label':k.title(),'count':v} for k,v in statuses.items()],'tags':[{'id':tag,'label':tag,'count':sum(tag in x['tags'] for x in outs)} for tag in sorted({t for x in outs for t in x['tags']})]},'recommended_action':{'title':'Upload your first asset' if not rows else 'Review draft assets','description':'Keep approved logos, images, and files ready for content.' if not rows else 'Approve only assets that are safe to use.','action_label':'Upload asset' if not rows else 'Review drafts','action_type':'upload' if not rows else 'review','severity':'warning' if not rows or statuses['draft'] else 'success'},'alerts':alerts}
+@app.get('/assets/overview')
+def assets_overview(u=Depends(user_from_auth),db:Session=Depends(get_db)): return _assets_overview(db,u)
+@app.get('/assets')
+def assets_list(u=Depends(user_from_auth),db:Session=Depends(get_db)): return _assets_overview(db,u)['assets']
+@app.get('/assets/{id}')
+def asset_get(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,a=_tenant_obj(db,u,m.Asset,id); return _asset_out(a)
+@app.post('/assets/upload')
+def asset_upload(file:UploadFile=File(...), title:str|None=Form(None), description:str=Form(''), tags:str=Form(''), asset_type:str|None=Form(None), status:str=Form('draft'), alt_text:str=Form(''), u=Depends(user_from_auth), db:Session=Depends(get_db)):
+    org,b=org_brand_or_404(db,u); mime=file.content_type or mimetypes.guess_type(file.filename or '')[0] or 'application/octet-stream'
+    if mime not in ALLOWED_ASSET_MIMES: raise HTTPException(422,{'error':'file_type_not_allowed','message':'This file type is not allowed'})
+    safe=re.sub(r'[^A-Za-z0-9._-]+','_',os.path.basename(file.filename or 'asset.bin')); folder=os.path.join(ASSET_ROOT,str(org.id),str(b.id)); os.makedirs(folder,exist_ok=True); name=f'{int(datetime.now(timezone.utc).timestamp())}_{safe}'; path=os.path.join(folder,name); size=0
+    with open(path,'wb') as out:
+        while chunk:=file.file.read(1024*1024):
+            size+=len(chunk)
+            if size>MAX_ASSET_BYTES: out.close(); os.remove(path); raise HTTPException(422,{'error':'file_too_large','message':'Asset exceeds maximum size'})
+            out.write(chunk)
+    at=asset_type or ('image' if mime.startswith('image/') else 'video' if mime.startswith('video/') else 'audio' if mime.startswith('audio/') else 'document' if mime in ['application/pdf','text/plain','text/markdown','application/vnd.openxmlformats-officedocument.wordprocessingml.document'] else 'other')
+    a=m.Asset(brand_id=b.id,name=title or safe,asset_type=at,url=None,description=description,tags_json=_json_list(tags),metadata_json={'filename':name,'original_filename':safe,'mime_type':mime,'size_bytes':size,'storage_path':path,'status':status,'alt_text':alt_text,'source':'upload','uploaded_by_user_id':u.id}); db.add(a); db.commit(); return _asset_out(a)
+@app.patch('/assets/{id}')
+def asset_patch(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,a=_tenant_obj(db,u,m.Asset,id); a.name=payload.get('title',payload.get('name',a.name)); a.description=payload.get('description',a.description); a.asset_type=payload.get('asset_type',a.asset_type); a.tags_json=_json_list(payload.get('tags',a.tags_json)); a.metadata_json={**(a.metadata_json or {}),**{k:payload[k] for k in ['status','alt_text','linked_content_draft_id','linked_campaign_id'] if k in payload}}; db.commit(); return _asset_out(a)
+@app.delete('/assets/{id}')
+def asset_delete(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,a=_tenant_obj(db,u,m.Asset,id); a.metadata_json={**(a.metadata_json or {}),'status':'archived'}; db.commit(); return {'deleted':id,'status':'archived'}
+@app.post('/assets/{id}/archive')
+def asset_archive(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return asset_patch(id,{'status':'archived'},u,db)
+@app.post('/assets/{id}/approve')
+def asset_approve(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return asset_patch(id,{'status':'approved'},u,db)
+@app.post('/assets/{id}/reject')
+def asset_reject(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return asset_patch(id,{'status':'rejected'},u,db)
+@app.post('/assets/{id}/duplicate-metadata')
+def asset_dup(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,b,a=_tenant_obj(db,u,m.Asset,id); copy=m.Asset(brand_id=b.id,name=a.name+' copy',asset_type=a.asset_type,url=a.url,description=a.description,tags_json=a.tags_json,metadata_json={**(a.metadata_json or {}),'status':'draft'}); db.add(copy); db.commit(); return _asset_out(copy)
+@app.post('/assets/{id}/attach-to-draft')
+def asset_attach_draft(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): return asset_patch(id,{'linked_content_draft_id':payload.get('draft_id')},u,db)
+@app.post('/assets/{id}/attach-to-campaign')
+def asset_attach_campaign(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): return asset_patch(id,{'linked_campaign_id':payload.get('campaign_id')},u,db)
+@app.post('/assets/{id}/copy-url')
+def asset_copy_url(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,a=_tenant_obj(db,u,m.Asset,id); return {'url':f'/assets/{id}/download','requires_auth':True,'message':'This download URL requires authentication.'}
+@app.get('/assets/{id}/download')
+def asset_download(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,a=_tenant_obj(db,u,m.Asset,id); return {'download_url':f'/assets/{id}/download','requires_auth':True,'filename':(a.metadata_json or {}).get('original_filename')}
+
+CATALOG=[('approval_link','Public approval link','approval','Share authenticated or tokenized approval links','Easy','manual',True,False,False),('telegram','Telegram Bot','publishing','Send approvals and assisted publishing messages','Medium','bot_token',True,False,False),('bale','Bale Bot','approval','Send approval requests to Bale','Medium','bot_token',True,False,False),('bale_safir','Bale Safir','approval','Transactional Bale notifications','Medium','api_key',True,False,False),('instagram','Instagram / Meta','publishing','Prepare assisted Instagram publishing kits','Hard','oauth',False,False,True),('facebook','Facebook Page','publishing','Meta page publishing when permissions are available','Hard','oauth',False,False,True),('google_business','Google Business Profile','publishing','Business profile posts and insights','Hard','oauth',False,True,False),('linkedin','LinkedIn','publishing','Assisted LinkedIn publishing','Hard','oauth',False,False,True),('tiktok','TikTok','publishing','Assisted short video publishing','Hard','oauth',False,False,True),('youtube','YouTube','publishing','YouTube publishing and analytics','Hard','oauth',False,False,True),('ga4','GA4','analytics','Read website analytics','Medium','manual',False,False,True),('meta_insights','Meta Insights','analytics','Read Meta performance','Hard','oauth',False,False,True),('youtube_analytics','YouTube Analytics','analytics','Read YouTube performance','Hard','oauth',False,False,True),('woocommerce','WooCommerce','ecommerce','Import products and orders','Medium','api_key',True,False,False),('brevo','Brevo','email','Send report emails and exports','Easy','api_key',True,False,False),('mailchimp','Mailchimp','email','Export campaign emails','Medium','api_key',False,False,True),('eitaa','Eitaa','publishing','Assisted local publishing','Medium','assisted',False,False,True),('soroush','Soroush','publishing','Assisted local publishing','Medium','assisted',False,False,True),('aparat','Aparat','publishing','Assisted video publishing','Medium','assisted',False,False,True),('rubika','Rubika','publishing','Assisted local publishing','Medium','assisted',False,False,True)]
+def _caps(cat):
+    return {'can_publish':cat in ['publishing','ecommerce'],'can_schedule':cat=='publishing','can_approve':cat=='approval','can_send_message':cat in ['approval','email'],'can_fetch_analytics':cat in ['analytics','ecommerce'],'can_import_orders':cat=='ecommerce','can_refresh':True}
+def _conn_out(c): return {'id':c.id,'provider':c.provider,'display_name':c.account_name,'category':(c.capabilities_json or {}).get('category','other'),'status':c.connection_status,'capabilities':c.capabilities_json or {},'config':{k:v for k,v in (c.credentials_encrypted_json or {}).items() if 'secret' not in k and 'token' not in k and 'key' not in k},'last_test_status':(c.credentials_encrypted_json or {}).get('last_test_status'),'last_test_message':(c.credentials_encrypted_json or {}).get('last_test_message'),'last_tested_at':(c.credentials_encrypted_json or {}).get('last_tested_at')}
+def _catalog(db,b):
+    conns={c.provider:c for c in db.query(m.ChannelAccount).filter_by(brand_id=b.id).all()}
+    out=[]
+    for provider,label,cat,purpose,diff,auth,available,mock,assisted in CATALOG:
+        c=conns.get(provider); status=c.connection_status if c else ('mock' if mock else 'assisted' if assisted else 'not_configured')
+        caps=(c.capabilities_json if c else _caps(cat)) or _caps(cat); out.append({'provider':provider,'label':label,'category':cat,'purpose':purpose,'status':status,'publishing':'Yes' if caps.get('can_publish') else 'Assisted' if assisted and cat=='publishing' else 'No','approval':'Yes' if caps.get('can_approve') else 'No','analytics':'Yes' if caps.get('can_fetch_analytics') else 'No','difficulty':diff,'capabilities':caps,'is_available':available,'is_mock':mock,'is_assisted':assisted,'connection_id':c.id if c else None,'auth_method':auth,'setup_requirements':auth,'docs':purpose})
+    return out
+
+def _integrations_overview(db,u):
+    org,b=org_brand_or_404(db,u); cat=_catalog(db,b); connected=[x for x in cat if x['status']=='connected']; errors=[x for x in cat if x['status']=='error']; alerts=[]
+    if not any(x['status']=='connected' and x['capabilities'].get('can_approve') for x in cat): alerts.append({'id':'no_approval','title':'No approval method connected','description':'Enable public approval link or connect Telegram/Bale.','severity':'warning','href':'/app/integrations'})
+    if not any(x['status']=='connected' and x['capabilities'].get('can_publish') for x in cat): alerts.append({'id':'no_publishing','title':'No publishing connector connected','description':'Configure at least one publishing channel or assisted kit.','severity':'info','href':'/app/integrations'})
+    if not any(x['status']=='connected' and x['capabilities'].get('can_fetch_analytics') for x in cat): alerts.append({'id':'no_analytics','title':'No analytics connector connected','description':'Connect GA4 or add manual metrics.','severity':'info','href':'/app/integrations'})
+    path=['approval_link','telegram','bale','instagram','woocommerce','ga4']; return {'user':{'id':u.id,'name':u.name or 'User','email':u.email},'organization':{'id':org.id,'name':org.name},'brand':{'id':b.id,'name':b.name},'summary':{'total_available':sum(x['is_available'] for x in cat),'connected_count':len(connected),'publishing_connected':sum(x['status']=='connected' and x['capabilities'].get('can_publish') for x in cat),'approval_connected':sum(x['status']=='connected' and x['capabilities'].get('can_approve') for x in cat),'analytics_connected':sum(x['status']=='connected' and x['capabilities'].get('can_fetch_analytics') for x in cat),'error_count':len(errors)},'recommended_path':[{'step':i+1,'provider':p,'label':next(x['label'] for x in cat if x['provider']==p),'purpose':next(x['purpose'] for x in cat if x['provider']==p),'status':next(x['status'] for x in cat if x['provider']==p),'action_label':'Configure','action_type':'connect'} for i,p in enumerate(path)],'catalog':cat,'alerts':alerts}
+@app.get('/integrations/overview')
+def integrations_overview(u=Depends(user_from_auth),db:Session=Depends(get_db)): return _integrations_overview(db,u)
+@app.get('/integrations/catalog')
+def integrations_catalog(u=Depends(user_from_auth),db:Session=Depends(get_db)): org,b=org_brand_or_404(db,u); return _catalog(db,b)
+@app.get('/integrations/connections')
+def integrations_connections(u=Depends(user_from_auth),db:Session=Depends(get_db)): org,b=org_brand_or_404(db,u); return [_conn_out(c) for c in db.query(m.ChannelAccount).filter_by(brand_id=b.id).all()]
+@app.get('/integrations/connections/{id}')
+def integration_connection(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,c=_tenant_obj(db,u,m.ChannelAccount,id); return _conn_out(c)
+@app.post('/integrations/connections')
+def integration_create(payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,b=org_brand_or_404(db,u); provider=payload.get('provider'); meta=next((x for x in CATALOG if x[0]==provider),None)
+    if not meta: raise HTTPException(422,{'error':'unknown_provider','message':'Unknown connector provider'})
+    caps=payload.get('capabilities') or _caps(meta[2]); status=payload.get('status') or ('connected' if provider=='approval_link' else 'needs_setup' if meta[6] else 'assisted' if meta[8] else 'mock' if meta[7] else 'needs_setup')
+    c=db.query(m.ChannelAccount).filter_by(brand_id=b.id,provider=provider).first() or m.ChannelAccount(brand_id=b.id,provider=provider,account_name=payload.get('display_name') or meta[1],account_identifier=provider)
+    c.account_name=payload.get('display_name') or c.account_name; c.connection_status=status; c.capabilities_json={**caps,'category':meta[2]}; c.credentials_encrypted_json={**(payload.get('config') or {}),'created_by_user_id':u.id}; db.add(c); db.commit(); return _conn_out(c)
+@app.patch('/integrations/connections/{id}')
+def integration_patch(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,c=_tenant_obj(db,u,m.ChannelAccount,id); c.account_name=payload.get('display_name',c.account_name); c.connection_status=payload.get('status',c.connection_status); c.capabilities_json={**(c.capabilities_json or {}),**(payload.get('capabilities') or {})}; c.credentials_encrypted_json={**(c.credentials_encrypted_json or {}),**(payload.get('config') or {})}; db.commit(); return _conn_out(c)
+@app.delete('/integrations/connections/{id}')
+def integration_delete(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return integration_disconnect(id,u,db)
+@app.post('/integrations/connections/{id}/test')
+def integration_test(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    _,_,c=_tenant_obj(db,u,m.ChannelAccount,id); meta=next((x for x in CATALOG if x[0]==c.provider),None); cfg=c.credentials_encrypted_json or {}; missing=[]
+    if meta and meta[5] in ['bot_token','api_key'] and not any(cfg.get(k) for k in ['bot_token','token','api_key','consumer_key']): missing.append(meta[5])
+    if missing: c.connection_status='needs_setup'; msg='Missing required credentials: '+', '.join(missing); code='missing_credentials'
+    elif meta and meta[8]: c.connection_status='assisted'; msg='This connector is assisted only. Smarbiz can prepare publishing kits, but direct API publishing is not connected.'; code='assisted_only'
+    elif meta and meta[7]: c.connection_status='mock'; msg='Mock connector available; no real external API call was made.'; code='mock_available'
+    else: c.connection_status='connected'; msg='Configuration saved and basic validation passed.'; code='ok'
+    c.credentials_encrypted_json={**cfg,'last_test_status':code,'last_test_message':msg,'last_tested_at':datetime.now(timezone.utc).isoformat()}; db.commit();
+    if missing: raise HTTPException(422,{'error':code,'message':msg})
+    return {'status':code,'message':msg,'connection':_conn_out(c)}
+@app.post('/integrations/connections/{id}/disconnect')
+def integration_disconnect(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): _,_,c=_tenant_obj(db,u,m.ChannelAccount,id); c.connection_status='disabled'; c.credentials_encrypted_json={}; db.commit(); return _conn_out(c)
+@app.post('/integrations/connections/{id}/refresh')
+def integration_refresh(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): return integration_test(id,u,db)
+@app.post('/integrations/connections/{id}/send-test')
+def integration_send_test(id:int,payload:dict|None=None,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    _,_,c=_tenant_obj(db,u,m.ChannelAccount,id)
+    if c.connection_status not in ['connected','mock']: raise HTTPException(422,{'error':'not_connected','message':'Connector is not connected; run Test connection first.'})
+    return {'status':'sent' if c.connection_status=='connected' else 'mock_available','message':'Test message acknowledged. External sending is only attempted for configured providers.'}
+@app.get('/integrations/oauth/{provider}/start')
+def oauth_start(provider:str,u=Depends(user_from_auth),db:Session=Depends(get_db)): return {'status':'not_implemented','message':'OAuth is not connected yet. Use assisted setup where available.'}
+@app.get('/integrations/oauth/{provider}/callback')
+def oauth_callback(provider:str,u=Depends(user_from_auth),db:Session=Depends(get_db)): return {'status':'not_implemented','message':'OAuth callback is not implemented yet.'}
