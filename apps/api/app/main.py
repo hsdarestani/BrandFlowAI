@@ -528,16 +528,6 @@ def create_asset(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depend
 def patch_asset(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)): row=db.get(m.Asset,id); [setattr(row,k,v) for k,v in payload.items() if hasattr(row,k)]; db.commit(); return row
 @app.delete('/assets/{id}')
 def del_asset(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): row=db.get(m.Asset,id); db.delete(row); db.commit(); return {'deleted':id}
-@app.get('/brands/{id}/campaigns')
-def campaigns(id:int,u=Depends(user_from_auth)): return []
-@app.post('/brands/{id}/campaigns')
-def create_campaign(id:int,payload:dict,u=Depends(user_from_auth)): return {'id':'campaign_mock','brand_id':id,**payload}
-@app.get('/campaigns/{id}')
-def campaign(id:str,u=Depends(user_from_auth)): return {'id':id,'status':'planned'}
-@app.patch('/campaigns/{id}')
-def patch_campaign(id:str,payload:dict,u=Depends(user_from_auth)): return {'id':id,**payload}
-@app.post('/campaigns/{id}/generate-plan')
-def campaign_plan(id:str,u=Depends(user_from_auth)): return {'campaign_id':id,'plan':['strategy','calendar','drafts','tracking links']}
 @app.get('/admin/overview')
 def admin_overview(u=Depends(user_from_auth),db:Session=Depends(get_db)): return {'organizations':db.query(m.Organization).count(),'brands':db.query(m.Brand).count(),'users':db.query(m.User).count(),'published_posts':db.query(m.PublishedPost).count(),'failed_jobs':db.query(m.JobLog).filter_by(status='failed').count(),'connector_errors':0,'pending_approvals':db.query(m.ApprovalRequest).filter_by(status='pending').count()}
 @app.get('/admin/organizations')
@@ -783,3 +773,179 @@ def studio_schedule(id:int,payload:StudioScheduleIn,u=Depends(user_from_auth),db
 def studio_export(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
     d,_,_=_assert_draft(id,u,db); j=_draft_json(d,db); kit=f"# {j['title']}\n\nChannel: {j['channel']}\nContent type: {j['content_type']}\n\nHook: {j.get('hook','')}\n\n{j['body']}\n\nCTA: {j.get('cta','')}\nHashtags: {j.get('hashtags','')}\n\nCompliance warnings: {j.get('warnings',[])}\nAsset suggestions: Use approved brand visuals."
     return {'filename':f"smarbiz-draft-{id}-kit.md",'content':kit}
+
+# --- Tenant-aware campaigns, insights, reports ---
+class CampaignIn(BaseModel):
+    brand_id:int|None=None; name:str=Field(min_length=1); goal:str|None=None; description:str=''; offer:str|None=None; target_audience:str|None=None; start_date:str|None=None; end_date:str|None=None; status:str='draft'; channels:list[str]=[]; content_pillars:list[str]=[]; budget:float|None=None
+class ManualMetricIn(BaseModel):
+    brand_id:int|None=None; source:str='manual'; channel:str='general'; metric_name:str=Field(min_length=1); metric_value:float; metric_date:str|None=None; notes:str|None=None; content_id:int|None=None; campaign_id:int|None=None
+class ReportGenerateIn(BaseModel):
+    brand_id:int|None=None; period_start:str|None=None; period_end:str|None=None; language:str='en'; audience:str='internal'; include_sections:list[str]=['summary','content_activity','approvals','campaigns','insights','recommendations','next_week_plan']
+
+def org_brand_or_404(db,u,brand_id=None):
+    org=current_org(db,u)
+    if not org: raise HTTPException(404,'Workspace not found')
+    brand=require_brand(db,u,brand_id) or active_brand(db,org)
+    if not brand: raise HTTPException(404,'Brand not found')
+    if brand.organization_id!=org.id: raise HTTPException(403,'Brand is outside your workspace')
+    return org,brand
+
+def campaign_row(db,c):
+    items=db.query(m.CampaignPlanItem).filter_by(campaign_id=c.id).all()
+    owner=db.get(m.User,c.owner_user_id) if c.owner_user_id else None
+    return {'id':c.id,'name':c.name,'goal':c.goal,'offer':c.offer,'description':c.description,'status':c.status,'channels':c.channels_json or [],'start_date':c.start_date,'end_date':c.end_date,'item_count':len(items),'scheduled_count':sum(1 for i in items if i.status=='scheduled' or i.linked_calendar_item_id),'draft_count':sum(1 for i in items if i.status=='draft' or i.linked_content_draft_id),'published_count':sum(1 for i in items if i.status=='published'),'owner':({'id':owner.id,'name':owner.name or 'User'} if owner else None),'updated_at':c.updated_at.isoformat() if hasattr(c.updated_at,'isoformat') else str(c.updated_at),'href':f'/app/campaigns?campaign={c.id}'}
+
+def _campaign(db,u,id):
+    org,brand=org_brand_or_404(db,u)
+    c=db.get(m.Campaign,id)
+    if not c: raise HTTPException(404,'Campaign not found')
+    if c.organization_id!=org.id or c.brand_id!=brand.id: raise HTTPException(403,'Campaign is outside your workspace')
+    return c,org,brand
+
+@app.get('/workspace/current')
+def workspace_current(u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org=current_org(db,u); brand=active_brand(db,org)
+    return {'user':{'id':u.id,'name':u.name or 'User','email':u.email},'organization':({'id':org.id,'name':org.name,'mode':org.mode} if org else None),'brand':({'id':brand.id,'name':brand.name,'primary_language':brand.primary_language} if brand else None),'recommended_action':(build_home_overview(db,u).get('recommended_action') if org and brand else None)}
+
+@app.get('/campaigns/overview')
+def campaigns_overview(u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u)
+    rows=db.query(m.Campaign).filter_by(organization_id=org.id,brand_id=brand.id).order_by(m.Campaign.updated_at.desc()).all()
+    plan_ids=[c.id for c in rows]
+    drafts=db.query(m.CampaignPlanItem).filter(m.CampaignPlanItem.campaign_id.in_(plan_ids),m.CampaignPlanItem.linked_content_draft_id != None).count() if plan_ids else 0
+    sched=db.query(m.CampaignPlanItem).filter(m.CampaignPlanItem.campaign_id.in_(plan_ids),m.CampaignPlanItem.linked_calendar_item_id != None).count() if plan_ids else 0
+    alerts=[]
+    for c in rows:
+        if db.query(m.CampaignPlanItem).filter_by(campaign_id=c.id).count()==0 and c.status in ('planned','active'): alerts.append({'id':f'campaign_{c.id}_empty','title':'Campaign has no content plan','description':c.name,'severity':'warning','href':f'/app/campaigns?campaign={c.id}'})
+    rec={'title':'Create your first campaign','description':'Group content around one launch, offer, or theme.','action_label':'Create campaign','action_type':'create_campaign','severity':'info'} if not rows else {'title':'Generate campaign plan','description':'Turn campaign goals into draft and calendar ideas.','action_label':'Generate campaign plan','action_type':'generate_plan','action_href':f'/app/campaigns?campaign={rows[0].id}','severity':'success'}
+    return {'user':{'id':u.id,'name':u.name or 'User','email':u.email},'organization':{'id':org.id,'name':org.name},'brand':{'id':brand.id,'name':brand.name,'primary_language':brand.primary_language},'summary':{'total_campaigns':len(rows),'active_campaigns':sum(c.status=='active' for c in rows),'planned_campaigns':sum(c.status=='planned' for c in rows),'completed_campaigns':sum(c.status=='completed' for c in rows),'drafts_from_campaigns':drafts,'scheduled_items_from_campaigns':sched,'needs_attention':len(alerts)},'campaigns':[campaign_row(db,c) for c in rows],'recommended_action':rec,'alerts':alerts,'setup':setup_state(db,brand)}
+@app.get('/campaigns')
+def list_campaigns(status:str|None=None,channel:str|None=None,q:str|None=None,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u); qry=db.query(m.Campaign).filter_by(organization_id=org.id,brand_id=brand.id)
+    if status: qry=qry.filter_by(status=status)
+    rows=qry.order_by(m.Campaign.updated_at.desc()).all()
+    if channel: rows=[r for r in rows if channel in (r.channels_json or [])]
+    if q: rows=[r for r in rows if q.lower() in ' '.join([r.name or '',r.goal or '',r.offer or '']).lower()]
+    return [campaign_row(db,r) for r in rows]
+@app.post('/campaigns')
+def create_campaign_new(data:CampaignIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u,data.brand_id)
+    if data.start_date and data.end_date and data.end_date < data.start_date: raise HTTPException(422,'End date cannot be before start date')
+    c=m.Campaign(organization_id=org.id,brand_id=brand.id,name=data.name.strip(),goal=data.goal,description=data.description,offer=data.offer,target_audience=data.target_audience,start_date=data.start_date,end_date=data.end_date,status=data.status,channels_json=data.channels,content_pillars_json=data.content_pillars,budget=data.budget,owner_user_id=u.id); db.add(c); db.commit(); db.refresh(c); return campaign_row(db,c)
+@app.get('/campaigns/{id}')
+def get_campaign_new(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    c,org,brand=_campaign(db,u,id); out=campaign_row(db,c); out['plan_items']=[{'id':i.id,'title':i.title,'channel':i.channel,'content_type':i.content_type,'brief':i.brief,'suggested_date':i.suggested_date,'status':i.status,'linked_content_draft_id':i.linked_content_draft_id,'linked_calendar_item_id':i.linked_calendar_item_id} for i in db.query(m.CampaignPlanItem).filter_by(campaign_id=c.id).all()]; return out
+@app.patch('/campaigns/{id}')
+def patch_campaign_new(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    c,_,_=_campaign(db,u,id)
+    for k,v in payload.items():
+        attr={'channels':'channels_json','content_pillars':'content_pillars_json'}.get(k,k)
+        if hasattr(c,attr): setattr(c,attr,v)
+    if c.start_date and c.end_date and c.end_date<c.start_date: raise HTTPException(422,'End date cannot be before start date')
+    db.commit(); return campaign_row(db,c)
+@app.delete('/campaigns/{id}')
+def delete_campaign_new(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    c,_,_=_campaign(db,u,id); db.query(m.CampaignPlanItem).filter_by(campaign_id=c.id).delete(); db.delete(c); db.commit(); return {'deleted':id}
+@app.post('/campaigns/{id}/generate-plan')
+def generate_campaign_plan_new(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    c,org,brand=_campaign(db,u,id); missing=setup_state(db,brand)['missing_requirements']
+    if missing: raise HTTPException(422,{'error':'missing_setup','missing_requirements':missing})
+    channels=c.channels_json or [a.provider for a in db.query(m.ChannelAccount).filter_by(brand_id=brand.id).limit(3)] or ['general']
+    db.query(m.CampaignPlanItem).filter_by(campaign_id=c.id).delete()
+    titles=['Announce the offer','Explain the customer problem','Share proof or FAQ','Publish a final reminder']
+    for n,title in enumerate(titles):
+        db.add(m.CampaignPlanItem(campaign_id=c.id,title=f'{title}: {c.name}',channel=channels[n%len(channels)],content_type='post',brief=f'Use goal "{c.goal or "awareness"}" and offer "{c.offer or "your current offer"}" for {c.target_audience or "your audience"}.',suggested_date=c.start_date,status='idea'))
+    if c.status=='draft': c.status='planned'
+    db.commit(); return get_campaign_new(id,u,db)
+@app.post('/campaigns/{id}/create-drafts')
+def campaign_create_drafts(id:int,payload:dict={},u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    c,org,brand=_campaign(db,u,id); ids=payload.get('plan_item_ids') or [i.id for i in db.query(m.CampaignPlanItem).filter_by(campaign_id=c.id).all()]
+    made=[]
+    for i in db.query(m.CampaignPlanItem).filter(m.CampaignPlanItem.campaign_id==c.id,m.CampaignPlanItem.id.in_(ids)).all():
+        d=m.ContentDraft(brand_id=brand.id,channel=i.channel,content_type=i.content_type,language=brand.primary_language,title=i.title,body=i.brief,status='draft_ready',created_by_user_id=u.id); db.add(d); db.flush(); i.linked_content_draft_id=d.id; i.status='draft'; made.append(d.id)
+    db.commit(); return {'created_draft_ids':made,'href':'/app/content-studio'}
+@app.post('/campaigns/{id}/create-calendar-items')
+def campaign_create_calendar(id:int,payload:dict={},u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    c,org,brand=_campaign(db,u,id); ids=payload.get('plan_item_ids') or [i.id for i in db.query(m.CampaignPlanItem).filter_by(campaign_id=c.id).all()]
+    made=[]
+    for i in db.query(m.CampaignPlanItem).filter(m.CampaignPlanItem.campaign_id==c.id,m.CampaignPlanItem.id.in_(ids)).all():
+        ci=m.CalendarItem(brand_id=brand.id,campaign_id=c.id,title=i.title,description=i.brief,status='planned',content_type=i.content_type,channels_json=[i.channel],language=brand.primary_language,created_by_user_id=u.id); db.add(ci); db.flush(); i.linked_calendar_item_id=ci.id; i.status='scheduled'; made.append(ci.id)
+    db.commit(); return {'created_calendar_item_ids':made,'href':f'/app/calendar?campaign={id}'}
+@app.post('/campaigns/{id}/archive')
+def archive_campaign(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): c,_,_=_campaign(db,u,id); c.status='archived'; db.commit(); return campaign_row(db,c)
+@app.post('/campaigns/{id}/duplicate')
+def duplicate_campaign(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    c,org,brand=_campaign(db,u,id); n=m.Campaign(organization_id=org.id,brand_id=brand.id,name=c.name+' copy',goal=c.goal,description=c.description,offer=c.offer,target_audience=c.target_audience,start_date=c.start_date,end_date=c.end_date,status='draft',channels_json=c.channels_json,content_pillars_json=c.content_pillars_json,budget=c.budget,owner_user_id=u.id); db.add(n); db.commit(); return campaign_row(db,n)
+
+@app.get('/insights/overview')
+def insights_overview(u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u); metrics=db.query(m.ManualMetric).filter_by(brand_id=brand.id).all(); channels=db.query(m.ChannelAccount).filter_by(brand_id=brand.id).all(); published=db.query(m.PublishedPost).join(m.ContentDraft,m.ContentDraft.id==m.PublishedPost.draft_id).filter(m.ContentDraft.brand_id==brand.id).count(); approvals=db.query(m.ApprovalRequest).join(m.ContentDraft,m.ContentDraft.id==m.ApprovalRequest.draft_id).filter(m.ContentDraft.brand_id==brand.id).all(); approved=sum(a.status=='approved' for a in approvals); analytics_connected=any(c.connection_status=='connected' and c.provider in ('ga4','instagram','tiktok','linkedin','youtube','google_business','woocommerce') for c in channels); by_channel={}
+    for mm in metrics:
+        ch=(mm.metrics_json or {}).get('channel','manual'); by_channel[ch]=by_channel.get(ch,0)+float((mm.metrics_json or {}).get('metric_value',0) or 0)
+    rec=[]
+    if not analytics_connected: rec.append({'id':'connect_analytics','title':'Connect analytics','description':'Connect GA4 or platform analytics, or keep adding manual metrics.','action_label':'Connect analytics','action_href':'/app/integrations','severity':'warning'})
+    if published==0: rec.append({'id':'publish_first','title':'Publish first content','description':'Insights improve after content is published or scheduled.','action_label':'Open Studio','action_href':'/app/content-studio','severity':'info'})
+    if db.query(m.Campaign).filter_by(brand_id=brand.id).count()==0: rec.append({'id':'group_campaigns','title':'Group content into campaigns','description':'Campaign links make performance easier to compare.','action_label':'Create campaign','action_href':'/app/campaigns','severity':'info'})
+    top=[{'id':mm.id,'title':(mm.metrics_json or {}).get('notes') or (mm.metrics_json or {}).get('metric_name'),'channel':(mm.metrics_json or {}).get('channel','manual'),'content_type':'manual metric','metric_label':(mm.metrics_json or {}).get('metric_name'),'metric_value':(mm.metrics_json or {}).get('metric_value'),'status':'manual','href':'/app/insights'} for mm in metrics[-5:]]
+    return {'user':{'id':u.id,'name':u.name or 'User','email':u.email},'organization':{'id':org.id,'name':org.name},'brand':{'id':brand.id,'name':brand.name,'primary_language':brand.primary_language},'connection_status':{'analytics_connected':analytics_connected,'connected_sources':[{'id':p,'label':p.replace('_',' ').title(),'status':'connected' if any(c.provider==p and c.connection_status=='connected' for c in channels) else 'missing','href':'/app/integrations'} for p in ['instagram','tiktok','linkedin','google_business','youtube','ga4','telegram','bale','woocommerce']]},'summary':{'published_posts':published,'total_approvals':len(approvals),'approval_rate':(round(approved/len(approvals)*100) if approvals else None),'best_channel':max(by_channel,key=by_channel.get) if by_channel else None,'top_content_type':None,'content_with_data_count':len(metrics),'warnings_count':0 if analytics_connected or metrics else 1},'trends':[{'date':mm.metric_date,'engagement':(mm.metrics_json or {}).get('metric_value')} for mm in metrics],'top_content':top,'recommendations':rec,'memory_candidates':[{'id':r['id'],'text':r['description'],'source':'manual','action_label':'Save to memory'} for r in rec],'alerts':([] if analytics_connected or metrics else [{'id':'no_insights','title':'No insights yet','description':'Connect analytics or add manual metrics.','severity':'warning','href':'/app/insights'}])}
+@app.get('/insights/snapshots')
+def insight_snaps(u=Depends(user_from_auth),db:Session=Depends(get_db)): org,brand=org_brand_or_404(db,u); return db.query(m.ManualMetric).filter_by(brand_id=brand.id).all()
+@app.post('/insights/manual-metric')
+def manual_metric(data:ManualMetricIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u,data.brand_id); mm=m.ManualMetric(brand_id=brand.id,source=data.source,metric_date=data.metric_date or datetime.now(timezone.utc).date().isoformat(),metrics_json={'channel':data.channel,'metric_name':data.metric_name,'metric_value':data.metric_value,'notes':data.notes,'content_id':data.content_id,'campaign_id':data.campaign_id,'created_by_user_id':u.id,'organization_id':org.id}); db.add(mm); db.commit(); return mm
+@app.post('/insights/refresh')
+def refresh_insights(u=Depends(user_from_auth),db:Session=Depends(get_db)): return {'refreshed':True,'overview':insights_overview(u,db)}
+@app.post('/insights/generate-recommendations')
+def gen_recs(u=Depends(user_from_auth),db:Session=Depends(get_db)): return {'recommendations':insights_overview(u,db)['recommendations']}
+@app.post('/insights/{id}/save-to-memory')
+def save_insight(id:str,payload:dict={},u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u); text=payload.get('text') or f'Insight recommendation: {id}'; note=m.BrandMemoryNote(brand_id=brand.id,note=text,source_type='insight',source_id=str(id),accepted_by_user_id=u.id,auto_generated=False); db.add(note); db.commit(); return {'saved':True,'memory_note_id':note.id}
+
+@app.get('/reports/overview')
+def reports_overview(u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u); now=datetime.now(timezone.utc).date(); start=now-timedelta(days=now.weekday()); end=start+timedelta(days=6); reps=db.query(m.WeeklyReport).filter_by(brand_id=brand.id).order_by(m.WeeklyReport.generated_at.desc()).all(); drafts=db.query(m.ContentDraft).filter_by(brand_id=brand.id).count(); approvals=db.query(m.ApprovalRequest).join(m.ContentDraft,m.ContentDraft.id==m.ApprovalRequest.draft_id).filter(m.ContentDraft.brand_id==brand.id).count(); campaigns=db.query(m.Campaign).filter_by(brand_id=brand.id).count(); published=db.query(m.PublishedPost).join(m.ContentDraft,m.ContentDraft.id==m.PublishedPost.draft_id).filter(m.ContentDraft.brand_id==brand.id).count(); metrics=db.query(m.ManualMetric).filter_by(brand_id=brand.id).count(); missing=[]
+    if metrics==0: missing.append({'id':'analytics','title':'No performance data yet','action_href':'/app/insights'})
+    if approvals==0: missing.append({'id':'approvals','title':'No approval decisions yet','action_href':'/app/approvals'})
+    return {'user':{'id':u.id,'name':u.name or 'User','email':u.email},'organization':{'id':org.id,'name':org.name},'brand':{'id':brand.id,'name':brand.name,'primary_language':brand.primary_language},'summary':{'total_reports':len(reps),'reports_this_month':sum(str(r.generated_at)[:7]==now.isoformat()[:7] for r in reps),'last_report_date':(reps[0].generated_at.isoformat() if reps and hasattr(reps[0].generated_at,'isoformat') else None),'generated_this_week':any(r.week_start==start.isoformat() for r in reps),'send_ready_count':len(reps)},'reports':[{'id':r.id,'title':(r.insights_json or {}).get('title') or f'Weekly report {r.week_start}','period_start':r.week_start,'period_end':r.week_end,'status':(r.insights_json or {}).get('status','generated'),'highlights_count':len((r.insights_json or {}).get('highlights',[])),'recommendations_count':len((r.recommendations_json or {}).get('items',(r.recommendations_json or {}).get('next_week',[]))),'created_at':r.generated_at.isoformat() if hasattr(r.generated_at,'isoformat') else str(r.generated_at),'href':f'/app/reports?report={r.id}'} for r in reps],'current_period_preview':{'period_start':start.isoformat(),'period_end':end.isoformat(),'published_count':published,'drafts_created_count':drafts,'approvals_count':approvals,'campaigns_count':campaigns,'insights_available':metrics>0,'missing_data':missing},'recommended_action':{'title':'Generate weekly report','description':'Create a report from current real workflow data.','action_label':'Generate weekly report','action_type':'generate_report','severity':'info' if not reps else 'success'},'alerts':([{'id':'report_missing_data','title':'Report missing performance data','description':'Add manual metrics or connect analytics for stronger reports.','severity':'warning','href':'/app/insights'}] if metrics==0 else [])}
+@app.get('/reports')
+def reports_list(u=Depends(user_from_auth),db:Session=Depends(get_db)): return reports_overview(u,db)['reports']
+@app.get('/reports/{id}')
+def report_get(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u); r=db.get(m.WeeklyReport,id)
+    if not r: raise HTTPException(404,'Report not found')
+    if r.brand_id!=brand.id: raise HTTPException(403,'Report is outside your workspace')
+    return {'id':r.id,'title':(r.insights_json or {}).get('title') or f'Weekly report {r.week_start}','period_start':r.week_start,'period_end':r.week_end,'status':(r.insights_json or {}).get('status','generated'),'summary':r.summary,'highlights':(r.insights_json or {}).get('highlights',[]),'metrics':(r.insights_json or {}).get('metrics',{}),'recommendations':r.recommendations_json,'created_at':r.generated_at.isoformat() if hasattr(r.generated_at,'isoformat') else str(r.generated_at)}
+@app.post('/reports/generate-weekly')
+def report_generate(data:ReportGenerateIn,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u,data.brand_id); now=datetime.now(timezone.utc).date(); start=data.period_start or (now-timedelta(days=now.weekday())).isoformat(); end=data.period_end or (datetime.fromisoformat(start).date()+timedelta(days=6)).isoformat(); drafts=db.query(m.ContentDraft).filter_by(brand_id=brand.id).count(); approvals=db.query(m.ApprovalRequest).join(m.ContentDraft,m.ContentDraft.id==m.ApprovalRequest.draft_id).filter(m.ContentDraft.brand_id==brand.id).count(); campaigns=db.query(m.Campaign).filter_by(brand_id=brand.id).count(); metrics=db.query(m.ManualMetric).filter_by(brand_id=brand.id).count(); summary=f'This Smarbiz report covers {start} to {end}: {drafts} drafts, {approvals} approval decisions, {campaigns} campaigns, and {metrics} manual analytics metrics. '
+    if metrics==0: summary+='Not enough performance data yet; this report focuses on setup and workflow progress.'
+    rep=m.WeeklyReport(brand_id=brand.id,week_start=start,week_end=end,summary=summary,insights_json={'title':f'Weekly report {start}','status':'generated','highlights':[f'{drafts} drafts created',f'{campaigns} campaigns active'],'metrics':{'drafts':drafts,'approvals':approvals,'campaigns':campaigns,'manual_metrics':metrics},'language':data.language,'audience':data.audience},recommendations_json={'items':['Connect analytics or add manual metrics' if metrics==0 else 'Use best-performing channels in next plan','Keep campaign goals connected to calendar items']}); db.add(rep); db.commit(); return report_get(rep.id,u,db)
+@app.post('/reports/{id}/regenerate')
+def report_regen(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)): old=report_get(id,u,db); return report_generate(ReportGenerateIn(period_start=old['period_start'],period_end=old['period_end']),u,db)
+
+@app.patch('/reports/{id}')
+def report_patch(id:int,payload:dict,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u); r=db.get(m.WeeklyReport,id)
+    if not r: raise HTTPException(404,'Report not found')
+    if r.brand_id!=brand.id: raise HTTPException(403,'Report is outside your workspace')
+    meta=r.insights_json or {}; meta['title']=payload.get('title',meta.get('title',f'Weekly report {r.week_start}')); meta['notes']=payload.get('notes',meta.get('notes','')); r.insights_json=meta; db.commit(); return report_get(id,u,db)
+@app.delete('/reports/{id}')
+def report_delete(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u); r=db.get(m.WeeklyReport,id)
+    if not r: raise HTTPException(404,'Report not found')
+    if r.brand_id!=brand.id: raise HTTPException(403,'Report is outside your workspace')
+    db.delete(r); db.commit(); return {'deleted':id}
+@app.post('/reports/{id}/copy-summary')
+def report_copy(id:int,u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    r=report_get(id,u,db); return {'text':r['summary'],'copied':True}
+@app.post('/reports/{id}/export')
+def report_export(id:int,payload:dict={},u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    r=report_get(id,u,db); fmt=payload.get('format','markdown')
+    text=f"# {r['title']}\n\n{r['period_start']} – {r['period_end']}\n\n{r['summary']}\n\n## Recommendations\n"+'\n'.join(f"- {x}" for x in (r.get('recommendations') or {}).get('items',[]))
+    if fmt=='pdf': return {'available':False,'message':'PDF export coming soon','format':'pdf'}
+    return {'available':True,'format':fmt,'content':text,'filename':f"smarbiz-report-{r['id']}.{('html' if fmt=='html' else 'md')}"}
+@app.post('/reports/{id}/send-email')
+def report_send(id:int,payload:dict={},u=Depends(user_from_auth),db:Session=Depends(get_db)):
+    org,brand=org_brand_or_404(db,u); email_acc=db.query(m.ChannelAccount).filter_by(brand_id=brand.id,provider='email',connection_status='connected').first()
+    if not email_acc: raise HTTPException(422,{'error':'email_not_connected','message':'Email connector is not connected','href':'/app/integrations'})
+    r=db.get(m.WeeklyReport,id); meta=r.insights_json or {}; meta['status']='sent'; meta['sent_to']=payload.get('recipient_email'); r.insights_json=meta; db.commit(); return {'sent':True,'report_id':id}
