@@ -1,3 +1,5 @@
+import os
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -100,6 +102,10 @@ def _guarded_create_all(bind=None, *args, **kwargs):
     production app starts before migrations have been applied, fail fast with a
     clear message instead of creating an unmanaged schema.
     """
+
+    running_migrations = os.getenv("SMARBIZ_RUNNING_MIGRATIONS") == "1"
+    if running_migrations:
+        return _original_create_all(bind=bind, *args, **kwargs)
 
     if settings.is_production and settings.require_migrations and not settings.allow_unsafe_dev_defaults:
         if bind is None or not _database_has_alembic_version(bind):
