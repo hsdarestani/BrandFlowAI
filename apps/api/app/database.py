@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     demo_mode: bool = True
     allow_mock_connectors: bool = False
     allow_unsafe_dev_defaults: bool = False
+    require_migrations: bool = True
 
     cors_origins: str = "http://localhost:3000,https://smarbiz.sbs,https://www.smarbiz.sbs"
     redis_url: str = "redis://redis:6379/0"
@@ -77,6 +78,40 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 class Base(DeclarativeBase):
     pass
+
+
+def _database_has_alembic_version(bind) -> bool:
+    try:
+        with bind.connect() as conn:
+            result = conn.execute(text("select version_num from alembic_version limit 1"))
+            return result.first() is not None
+    except Exception:
+        return False
+
+
+_original_create_all = Base.metadata.create_all
+
+
+def _guarded_create_all(bind=None, *args, **kwargs):
+    """Keep legacy dev bootstrapping while blocking ad-hoc production DDL.
+
+    main.py still imports `Base.metadata.create_all(...)` for MVP/dev bootstraps.
+    In production this must not create or mutate tables outside Alembic.  If a
+    production app starts before migrations have been applied, fail fast with a
+    clear message instead of creating an unmanaged schema.
+    """
+
+    if settings.is_production and settings.require_migrations and not settings.allow_unsafe_dev_defaults:
+        if bind is None or not _database_has_alembic_version(bind):
+            raise RuntimeError(
+                "Production database is not migration-managed. Run `alembic upgrade head` "
+                "before starting the API, or set REQUIRE_MIGRATIONS=false only for a one-off recovery."
+            )
+        return None
+    return _original_create_all(bind=bind, *args, **kwargs)
+
+
+Base.metadata.create_all = _guarded_create_all
 
 
 def get_db():
