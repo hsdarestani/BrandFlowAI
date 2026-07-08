@@ -1,4 +1,4 @@
-.PHONY: up down api web seed test
+.PHONY: up down api web seed test migrate migrate-new migrate-current
 up:
 	docker compose up --build
 down:
@@ -11,3 +11,9 @@ seed:
 	cd apps/api && python -m app.seed
 test:
 	cd apps/api && pytest -q
+migrate:
+	cd apps/api && alembic upgrade head
+migrate-current:
+	cd apps/api && alembic current
+migrate-new:
+	cd apps/api && alembic revision --autogenerate -m "$(name)"
