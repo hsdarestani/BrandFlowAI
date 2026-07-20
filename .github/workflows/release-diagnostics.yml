@@ -1,0 +1,56 @@
+name: Release Diagnostics
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  validate:
+    if: github.head_ref == 'agent/smarbiz-release' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV: development
+      DATABASE_URL: sqlite:///./release-ci.db
+      JWT_SECRET: release-ci-secret-with-more-than-thirty-two-characters
+      CONNECTOR_SECRET_KEY: release-ci-connector-secret-with-more-than-thirty-two-characters
+      AUTH_RATE_LIMIT_PER_MINUTE: 1000
+      NEXT_PUBLIC_API_URL: /api
+      DEMO_MODE: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: apps/api/requirements.txt
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: pip install -r requirements.txt
+      - name: Validate single Alembic head
+        working-directory: apps/api
+        run: test "$(alembic heads | wc -l)" -eq 1
+      - name: API tests
+        working-directory: apps/api
+        run: pytest -q --tb=short
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install web dependencies
+        working-directory: apps/web
+        run: npm install
+      - name: TypeScript
+        working-directory: apps/web
+        run: npm run lint
+      - name: Next build
+        working-directory: apps/web
+        run: npm run build
+      - name: Compose and containers
+        run: |
+          cp .env.production.example .env.production
+          docker compose --env-file .env.production -f docker-compose.prod.yml config --quiet
+          docker compose --env-file .env.production -f docker-compose.prod.yml build
