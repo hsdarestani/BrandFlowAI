@@ -128,6 +128,17 @@ jobs:
             apt-get update
             apt-get install -y docker-compose-plugin
           fi
+          if ! command -v curl >/dev/null 2>&1 || ! command -v ufw >/dev/null 2>&1; then
+            apt-get update
+            apt-get install -y curl ufw
+          fi
+
+          ufw allow 22/tcp
+          ufw allow 80/tcp
+          ufw allow 443/tcp
+          ufw allow 443/udp
+          ufw --force enable
+          ufw reload
 
           BASE=/opt/smarbiz
           RELEASE="$BASE/releases/$RELEASE_SHA"
@@ -201,8 +212,28 @@ jobs:
           docker compose --env-file .env.production -f docker-compose.prod.yml exec -T web \
             node -e "fetch('http://127.0.0.1:3000/en').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
+          CADDY_READY=0
+          for _ in $(seq 1 45); do
+            if curl --fail --silent --show-error --insecure \
+              --resolve smarbiz.sbs:443:127.0.0.1 \
+              https://smarbiz.sbs/healthz >/dev/null 2>&1; then
+              CADDY_READY=1
+              break
+            fi
+            sleep 4
+          done
+
+          if [ "$CADDY_READY" != "1" ]; then
+            echo "Caddy did not become healthy on the origin HTTPS endpoint."
+            ss -lntup || true
+            docker compose --env-file .env.production -f docker-compose.prod.yml ps
+            docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=250 caddy
+            exit 1
+          fi
+
           docker image prune -f
           find "$BASE/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +4 | cut -d' ' -f2- | xargs -r rm -rf
+          ufw status verbose
           docker compose --env-file .env.production -f docker-compose.prod.yml ps
           REMOTE
 
@@ -225,11 +256,11 @@ jobs:
               `- Commit: \`${context.sha}\``,
               `- SSH preflight: **${process.env.PREFLIGHT_CONCLUSION || 'not run'}**`,
               `- Release upload: **${process.env.UPLOAD_CONCLUSION || 'not run'}**`,
-              `- Remote deploy and health checks: **${process.env.DEPLOY_CONCLUSION || 'not run'}**`,
+              `- Remote deploy, app health, Caddy, and firewall: **${process.env.DEPLOY_CONCLUSION || 'not run'}**`,
               `- Workflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               '',
               success
-                ? 'The API and web containers passed their internal health checks.'
+                ? 'The API, web, and origin HTTPS endpoint passed their health checks.'
                 : 'Open the workflow link for the exact failing command.',
             ].join('\n');
             const {data: issues} = await github.rest.issues.listForRepo({
