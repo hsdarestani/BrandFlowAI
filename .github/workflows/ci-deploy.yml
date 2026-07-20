@@ -128,15 +128,14 @@ jobs:
             apt-get update
             apt-get install -y docker-compose-plugin
           fi
-          if ! command -v curl >/dev/null 2>&1 || ! command -v ufw >/dev/null 2>&1; then
+          if ! command -v curl >/dev/null 2>&1 || ! command -v ufw >/dev/null 2>&1 || ! command -v nginx >/dev/null 2>&1; then
             apt-get update
-            apt-get install -y curl ufw
+            apt-get install -y curl ufw nginx
           fi
 
           ufw allow 22/tcp
           ufw allow 80/tcp
           ufw allow 443/tcp
-          ufw allow 443/udp
           ufw --force enable
           ufw reload
 
@@ -175,7 +174,6 @@ jobs:
           GEMINI_API_KEY=
           CORS_ORIGINS=https://smarbiz.sbs,https://www.smarbiz.sbs
           NEXT_PUBLIC_API_URL=/api
-          ACME_EMAIL=admin@smarbiz.sbs
           TELEGRAM_BOT_TOKEN=
           BALE_BOT_TOKEN=
           BALE_BASE_URL=https://tapi.bale.ai/bot{token}/{method}
@@ -193,43 +191,65 @@ jobs:
 
           docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build --remove-orphans
 
-          READY=0
+          API_READY=0
+          WEB_READY=0
           for _ in $(seq 1 45); do
-            if docker compose --env-file .env.production -f docker-compose.prod.yml exec -T api \
-              python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" >/dev/null 2>&1; then
-              READY=1
+            if curl --fail --silent --show-error --max-time 4 http://127.0.0.1:18000/health >/dev/null 2>&1; then
+              API_READY=1
+            fi
+            if curl --fail --silent --show-error --max-time 4 http://127.0.0.1:13000/en >/dev/null 2>&1; then
+              WEB_READY=1
+            fi
+            if [ "$API_READY" = "1" ] && [ "$WEB_READY" = "1" ]; then
               break
             fi
             sleep 4
           done
 
-          if [ "$READY" != "1" ]; then
+          if [ "$API_READY" != "1" ] || [ "$WEB_READY" != "1" ]; then
+            echo "Loopback API or web service did not become healthy."
             docker compose --env-file .env.production -f docker-compose.prod.yml ps
-            docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=200 api postgres
+            docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=220 api web postgres
             exit 1
           fi
 
-          docker compose --env-file .env.production -f docker-compose.prod.yml exec -T web \
-            node -e "fetch('http://127.0.0.1:3000/en').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+          test -f /etc/letsencrypt/live/smarbiz.sbs/fullchain.pem
+          test -f /etc/letsencrypt/live/smarbiz.sbs/privkey.pem
 
-          CADDY_READY=0
-          for _ in $(seq 1 45); do
-            if curl --fail --silent --show-error --insecure \
-              --resolve smarbiz.sbs:443:127.0.0.1 \
-              https://smarbiz.sbs/healthz >/dev/null 2>&1; then
-              CADDY_READY=1
-              break
+          NGINX_BACKUP="$SHARED/nginx-smarbiz-before-$RELEASE_SHA.conf"
+          if [ -e /etc/nginx/sites-enabled/smarbiz ]; then
+            cp -L /etc/nginx/sites-enabled/smarbiz "$NGINX_BACKUP"
+          fi
+
+          install -m 0644 infra/nginx/smarbiz.conf /etc/nginx/sites-available/smarbiz
+          rm -f /etc/nginx/sites-enabled/smarbiz
+          ln -s /etc/nginx/sites-available/smarbiz /etc/nginx/sites-enabled/smarbiz
+
+          if ! nginx -t; then
+            echo "New Nginx configuration is invalid; restoring the previous site."
+            if [ -f "$NGINX_BACKUP" ]; then
+              install -m 0644 "$NGINX_BACKUP" /etc/nginx/sites-available/smarbiz
+              rm -f /etc/nginx/sites-enabled/smarbiz
+              ln -s /etc/nginx/sites-available/smarbiz /etc/nginx/sites-enabled/smarbiz
+              nginx -t
             fi
-            sleep 4
-          done
-
-          if [ "$CADDY_READY" != "1" ]; then
-            echo "Caddy did not become healthy on the origin HTTPS endpoint."
-            ss -lntup || true
-            docker compose --env-file .env.production -f docker-compose.prod.yml ps
-            docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=250 caddy
             exit 1
           fi
+
+          systemctl enable nginx
+          systemctl reload nginx
+
+          curl --fail --silent --show-error --insecure --max-time 10 \
+            --resolve smarbiz.sbs:443:127.0.0.1 \
+            https://smarbiz.sbs/healthz | grep -q '^ok'
+
+          curl --fail --silent --show-error --insecure --max-time 15 \
+            --resolve smarbiz.sbs:443:127.0.0.1 \
+            https://smarbiz.sbs/api/health | grep -q '"ok"[[:space:]]*:[[:space:]]*true'
+
+          curl --fail --silent --show-error --insecure --max-time 15 \
+            --resolve smarbiz.sbs:443:127.0.0.1 \
+            https://smarbiz.sbs/en | grep -qi 'Smarbiz'
 
           docker image prune -f
           find "$BASE/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +4 | cut -d' ' -f2- | xargs -r rm -rf
@@ -256,11 +276,11 @@ jobs:
               `- Commit: \`${context.sha}\``,
               `- SSH preflight: **${process.env.PREFLIGHT_CONCLUSION || 'not run'}**`,
               `- Release upload: **${process.env.UPLOAD_CONCLUSION || 'not run'}**`,
-              `- Remote deploy, app health, Caddy, and firewall: **${process.env.DEPLOY_CONCLUSION || 'not run'}**`,
+              `- Containers, migrations, Nginx, and origin health: **${process.env.DEPLOY_CONCLUSION || 'not run'}**`,
               `- Workflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               '',
               success
-                ? 'The API, web, and origin HTTPS endpoint passed their health checks.'
+                ? 'PostgreSQL, Redis, API, Web, Nginx, and all origin health endpoints passed.'
                 : 'Open the workflow link for the exact failing command.',
             ].join('\n');
             const {data: issues} = await github.rest.issues.listForRepo({
