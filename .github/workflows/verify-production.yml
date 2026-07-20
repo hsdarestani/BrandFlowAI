@@ -1,0 +1,143 @@
+name: Verify Production
+
+on:
+  workflow_run:
+    workflows: ["CI and Deploy"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: smarbiz-production-verification
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify DNS and public HTTPS
+        id: public
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ORIGIN_IP="91.107.157.75"
+          REPORT=/tmp/public-verification.txt
+          : > "$REPORT"
+
+          echo "Origin IPv4: $ORIGIN_IP" | tee -a "$REPORT"
+          DNS_OK=0
+          IPS=""
+          for attempt in $(seq 1 18); do
+            IPS="$(getent ahostsv4 smarbiz.sbs 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+            echo "DNS attempt $attempt: ${IPS:-no A record}" | tee -a "$REPORT"
+            if [ -n "$IPS" ]; then
+              DNS_OK=1
+              break
+            fi
+            sleep 10
+          done
+
+          if [ "$DNS_OK" != "1" ]; then
+            echo "DNS verification failed: smarbiz.sbs has no public IPv4 record." | tee -a "$REPORT"
+            exit 1
+          fi
+
+          if echo " $IPS " | grep -q " $ORIGIN_IP "; then
+            echo "DNS routing mode: direct to origin." | tee -a "$REPORT"
+          else
+            echo "DNS routing mode: proxied/CDN (origin IP intentionally hidden)." | tee -a "$REPORT"
+          fi
+
+          echo "Checking public proxy health..." | tee -a "$REPORT"
+          curl --fail --show-error --silent --location \
+            --retry 12 --retry-delay 10 --retry-all-errors \
+            --connect-timeout 10 --max-time 30 \
+            https://smarbiz.sbs/healthz | tee -a "$REPORT"
+          echo | tee -a "$REPORT"
+
+          echo "Checking public API health..." | tee -a "$REPORT"
+          API_RESPONSE="$(curl --fail --show-error --silent --location \
+            --retry 6 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 10 --max-time 30 \
+            https://smarbiz.sbs/api/health)"
+          echo "$API_RESPONSE" | tee -a "$REPORT"
+          echo "$API_RESPONSE" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'
+
+          echo "Checking public landing page..." | tee -a "$REPORT"
+          STATUS="$(curl --fail --show-error --silent --location \
+            --retry 6 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 10 --max-time 30 \
+            --output /tmp/smarbiz-home.html --write-out '%{http_code}' \
+            https://smarbiz.sbs/en)"
+          echo "Landing HTTP status: $STATUS" | tee -a "$REPORT"
+          test "$STATUS" = "200"
+          test -s /tmp/smarbiz-home.html
+          grep -qi 'Smarbiz' /tmp/smarbiz-home.html
+
+          echo "Public DNS, TLS, proxy, API, and landing-page checks passed." | tee -a "$REPORT"
+
+      - name: Report public availability
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          PUBLIC_OUTCOME: ${{ steps.public.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '[Deploy] Smarbiz production status';
+            const success = process.env.PUBLIC_OUTCOME === 'success';
+            let details = 'No verification output was produced.';
+            try {
+              details = fs.readFileSync('/tmp/public-verification.txt', 'utf8').trim();
+            } catch (_) {}
+            if (details.length > 6000) details = details.slice(-6000);
+
+            const {data: issues} = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find(issue => issue.title === title && !issue.pull_request);
+            const previousBody = existing?.body || 'No internal deployment report was found.';
+            const publicSection = [
+              '',
+              '---',
+              `## ${success ? '✅ Public availability verified' : '❌ Public availability failed'}`,
+              '',
+              `- Verification workflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              `- Outcome: **${process.env.PUBLIC_OUTCOME || 'not run'}**`,
+              '',
+              '<details><summary>Verification details</summary>',
+              '',
+              '```text',
+              details.replace(/```/g, "'''"),
+              '```',
+              '</details>',
+            ].join('\n');
+            const body = previousBody.replace(/\n---\n## [✅❌] Public availability[\s\S]*$/m, '') + publicSection;
+
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+            }
+
+      - name: Fail when public availability is not verified
+        if: steps.public.outcome != 'success'
+        run: exit 1
