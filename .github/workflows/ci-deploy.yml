@@ -70,11 +70,14 @@ jobs:
         working-directory: apps/web
         run: npm run build
 
+      - name: Prepare production environment for CI
+        run: cp .env.production.example .env.production
+
       - name: Validate production Compose
-        run: docker compose --env-file .env.production.example -f docker-compose.prod.yml config --quiet
+        run: docker compose --env-file .env.production -f docker-compose.prod.yml config --quiet
 
       - name: Build production containers
-        run: docker compose --env-file .env.production.example -f docker-compose.prod.yml build
+        run: docker compose --env-file .env.production -f docker-compose.prod.yml build
 
   deploy:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
