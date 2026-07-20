@@ -1,0 +1,121 @@
+name: Origin Diagnostics
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/origin-diagnostics.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: smarbiz-origin-diagnostics
+  cancel-in-progress: true
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install SSH password client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
+      - name: Collect origin diagnostics
+        id: collect
+        continue-on-error: true
+        env:
+          SSHPASS: ${{ secrets.PASS }}
+        run: |
+          set +e
+          sshpass -e ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@91.107.157.75 'bash -s' > /tmp/origin-diagnostics.txt 2>&1 <<'REMOTE'
+          set +e
+          echo '=== DATE ==='
+          date -Is
+          echo
+          echo '=== UFW ==='
+          ufw status verbose 2>&1
+          echo
+          echo '=== LISTENING PORTS ==='
+          ss -lntup 2>&1 | grep -E '(:22|:80|:443|Local Address)' || true
+          echo
+          echo '=== DOCKER PS ==='
+          cd /opt/smarbiz/current 2>/dev/null || exit 2
+          docker compose --env-file .env.production -f docker-compose.prod.yml ps 2>&1
+          echo
+          echo '=== CADDY CONFIG VALIDATION ==='
+          docker compose --env-file .env.production -f docker-compose.prod.yml exec -T caddy caddy validate --config /etc/caddy/Caddyfile 2>&1
+          echo
+          echo '=== HTTP ORIGIN HEALTH ==='
+          curl -v --connect-timeout 8 --max-time 15 -H 'Host: smarbiz.sbs' http://127.0.0.1/healthz 2>&1
+          echo
+          echo '=== HTTPS ORIGIN HEALTH ==='
+          curl -vk --connect-timeout 8 --max-time 20 --resolve smarbiz.sbs:443:127.0.0.1 https://smarbiz.sbs/healthz 2>&1
+          echo
+          echo '=== API THROUGH ORIGIN HTTPS ==='
+          curl -vk --connect-timeout 8 --max-time 20 --resolve smarbiz.sbs:443:127.0.0.1 https://smarbiz.sbs/api/health 2>&1
+          echo
+          echo '=== CADDY LOGS ==='
+          docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=180 caddy 2>&1
+          echo
+          echo '=== PUBLIC IP FROM ORIGIN ==='
+          curl -4 --silent --show-error --max-time 10 https://api.ipify.org 2>&1
+          echo
+          REMOTE
+          STATUS=$?
+          cat /tmp/origin-diagnostics.txt
+          exit $STATUS
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: origin-diagnostics
+          path: /tmp/origin-diagnostics.txt
+          if-no-files-found: error
+
+      - name: Publish diagnostics to deployment issue
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          COLLECT_OUTCOME: ${{ steps.collect.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '[Deploy] Smarbiz production status';
+            let output = 'Diagnostics file was not created.';
+            try { output = fs.readFileSync('/tmp/origin-diagnostics.txt', 'utf8').trim(); } catch (_) {}
+            if (output.length > 12000) output = output.slice(-12000);
+
+            const {data: issues} = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find(issue => issue.title === title && !issue.pull_request);
+            const previous = existing?.body || 'No deployment status report exists.';
+            const section = [
+              '',
+              '---',
+              '## Origin diagnostics',
+              '',
+              `- Collection outcome: **${process.env.COLLECT_OUTCOME || 'unknown'}**`,
+              `- Workflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              '<details><summary>Server, firewall, Caddy, and origin checks</summary>',
+              '',
+              '```text',
+              output.replace(/```/g, "'''"),
+              '```',
+              '</details>',
+            ].join('\n');
+            const body = previous.replace(/\n---\n## Origin diagnostics[\s\S]*$/m, '') + section;
+
+            if (existing) {
+              await github.rest.issues.update({owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body});
+            } else {
+              await github.rest.issues.create({owner: context.repo.owner, repo: context.repo.repo, title, body});
+            }
