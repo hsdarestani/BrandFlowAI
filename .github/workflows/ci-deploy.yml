@@ -39,7 +39,20 @@ jobs:
 
       - name: Run API tests
         working-directory: apps/api
-        run: pytest -q
+        run: |
+          set +e
+          pytest -q --tb=short > pytest.log 2>&1
+          STATUS=$?
+          cat pytest.log
+          exit $STATUS
+
+      - name: Upload API test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log
+          path: apps/api/pytest.log
+          if-no-files-found: ignore
 
       - uses: actions/setup-node@v4
         with:
