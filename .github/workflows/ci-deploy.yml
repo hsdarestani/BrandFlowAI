@@ -209,6 +209,7 @@ jobs:
           find "$BASE/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +4 | cut -d' ' -f2- | xargs -r rm -rf
           docker compose --env-file .env.production -f docker-compose.prod.yml ps
           REMOTE
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
       - name: Report production deployment
         if: always()
@@ -216,11 +217,11 @@ jobs:
         env:
           PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome }}
           UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
-          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          DEPLOY_STATUS: ${{ steps.deploy.outputs.status }}
         with:
           script: |
             const title = '[Deploy] Smarbiz production status';
-            const success = process.env.DEPLOY_OUTCOME === 'success';
+            const success = process.env.DEPLOY_STATUS === 'success';
             const marker = success ? '✅ Successful' : '❌ Failed';
             const body = [
               `## ${marker}`,
@@ -228,7 +229,7 @@ jobs:
               `- Commit: \`${context.sha}\``,
               `- SSH preflight: **${process.env.PREFLIGHT_OUTCOME || 'not run'}**`,
               `- Release upload: **${process.env.UPLOAD_OUTCOME || 'not run'}**`,
-              `- Remote deploy and health checks: **${process.env.DEPLOY_OUTCOME || 'not run'}**`,
+              `- Remote deploy and health checks: **${process.env.DEPLOY_STATUS || 'not completed'}**`,
               `- Workflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               '',
               success
@@ -259,5 +260,5 @@ jobs:
             }
 
       - name: Fail workflow when deployment failed
-        if: steps.deploy.outcome != 'success'
+        if: steps.deploy.outputs.status != 'success'
         run: exit 1
