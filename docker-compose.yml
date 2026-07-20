@@ -4,35 +4,68 @@ services:
     environment:
       POSTGRES_DB: smarbiz
       POSTGRES_USER: smarbiz
-      POSTGRES_PASSWORD: smarbiz
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-smarbiz}
     ports: ["127.0.0.1:5432:5432"]
     volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smarbiz -d smarbiz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   redis:
     image: redis:7-alpine
     ports: ["127.0.0.1:6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   api:
     build: ./apps/api
     env_file: .env
-    environment:
-      DATABASE_URL: postgresql+psycopg://smarbiz:smarbiz@postgres:5432/smarbiz
+    environment: &api_environment
+      DATABASE_URL: postgresql+psycopg://smarbiz:${POSTGRES_PASSWORD:-smarbiz}@postgres:5432/smarbiz
+      REDIS_URL: redis://redis:6379/0
+      RUN_MIGRATIONS: "true"
     ports: ["8000:8000"]
-    depends_on: [postgres, redis]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   worker:
+    profiles: ["background"]
     build: ./apps/api
     command: python worker.py
     env_file: .env
-    depends_on: [api, redis]
+    environment: *api_environment
+    depends_on:
+      api:
+        condition: service_healthy
+
   scheduler:
+    profiles: ["background"]
     build: ./apps/api
     command: python scheduler.py
     env_file: .env
-    depends_on: [api, redis]
+    environment: *api_environment
+    depends_on:
+      api:
+        condition: service_healthy
+
   web:
-    build: ./apps/web
-    environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.smarbiz.sbs}
-      NEXT_PUBLIC_DEMO_MODE: ${DEMO_MODE:-true}
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_DEMO_MODE: ${DEMO_MODE:-true}
     ports: ["3000:3000"]
-    depends_on: [api]
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   postgres_data:
