@@ -23,49 +23,73 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y sshpass
 
-      - name: Collect origin diagnostics
+      - name: Test origin from the public runner
+        continue-on-error: true
+        run: |
+          {
+            echo '=== EXTERNAL DIRECT HTTP TO ORIGIN ==='
+            curl -v --connect-timeout 8 --max-time 12 --resolve smarbiz.sbs:80:91.107.157.75 http://smarbiz.sbs/healthz 2>&1 || true
+            echo
+            echo '=== EXTERNAL DIRECT HTTPS TO ORIGIN ==='
+            curl -vk --connect-timeout 8 --max-time 15 --resolve smarbiz.sbs:443:91.107.157.75 https://smarbiz.sbs/healthz 2>&1 || true
+          } > /tmp/external-diagnostics.txt
+          cat /tmp/external-diagnostics.txt
+
+      - name: Collect server diagnostics
         id: collect
         continue-on-error: true
         env:
           SSHPASS: ${{ secrets.PASS }}
         run: |
           set +e
-          sshpass -e ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@91.107.157.75 'bash -s' > /tmp/origin-diagnostics.txt 2>&1 <<'REMOTE'
+          sshpass -e ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@91.107.157.75 'bash -s' > /tmp/server-diagnostics.txt 2>&1 <<'REMOTE'
           set +e
+          cd /opt/smarbiz/current 2>/dev/null || exit 2
+
           echo '=== DATE ==='
           date -Is
           echo
           echo '=== UFW ==='
           ufw status verbose 2>&1
           echo
-          echo '=== LISTENING PORTS ==='
-          ss -lntup 2>&1 | grep -E '(:22|:80|:443|Local Address)' || true
+          echo '=== OWNERS OF 80/443 ==='
+          ss -lntup 2>&1 | grep -E '(:80|:443|Local Address)' || true
           echo
-          echo '=== DOCKER PS ==='
-          cd /opt/smarbiz/current 2>/dev/null || exit 2
+          echo '=== NGINX SERVICE ==='
+          systemctl is-active nginx 2>&1
+          systemctl is-enabled nginx 2>&1
+          echo
+          echo '=== NGINX RELEVANT CONFIG ==='
+          nginx -T 2>&1 | grep -E '(^# configuration file|listen |server_name |proxy_pass |ssl_certificate |root )' | head -n 260
+          echo
+          echo '=== AVAILABLE CERTIFICATES ==='
+          find /etc/letsencrypt/live -maxdepth 2 -type l -o -type f 2>/dev/null | sort | head -n 100
+          echo
+          echo '=== COMPOSE SERVICES ==='
           docker compose --env-file .env.production -f docker-compose.prod.yml ps 2>&1
           echo
-          echo '=== CADDY CONFIG VALIDATION ==='
-          docker compose --env-file .env.production -f docker-compose.prod.yml exec -T caddy caddy validate --config /etc/caddy/Caddyfile 2>&1
+          echo '=== CADDY PORT BINDINGS ==='
+          docker inspect smarbiz-caddy-1 --format 'PortBindings={{json .HostConfig.PortBindings}} NetworkPorts={{json .NetworkSettings.Ports}}' 2>&1
+          docker port smarbiz-caddy-1 2>&1
           echo
-          echo '=== HTTP ORIGIN HEALTH ==='
-          curl -v --connect-timeout 8 --max-time 15 -H 'Host: smarbiz.sbs' http://127.0.0.1/healthz 2>&1
+          echo '=== RENDERED CADDY SERVICE ==='
+          docker compose --env-file .env.production -f docker-compose.prod.yml config caddy 2>&1
           echo
-          echo '=== HTTPS ORIGIN HEALTH ==='
-          curl -vk --connect-timeout 8 --max-time 20 --resolve smarbiz.sbs:443:127.0.0.1 https://smarbiz.sbs/healthz 2>&1
+          echo '=== LOCAL NGINX HTTP RESPONSE ==='
+          curl -v --connect-timeout 5 --max-time 12 -H 'Host: smarbiz.sbs' http://127.0.0.1/healthz 2>&1
           echo
-          echo '=== API THROUGH ORIGIN HTTPS ==='
-          curl -vk --connect-timeout 8 --max-time 20 --resolve smarbiz.sbs:443:127.0.0.1 https://smarbiz.sbs/api/health 2>&1
+          echo '=== LOCAL NGINX HTTPS RESPONSE ==='
+          curl -vk --connect-timeout 5 --max-time 15 --resolve smarbiz.sbs:443:127.0.0.1 https://smarbiz.sbs/healthz 2>&1
           echo
-          echo '=== CADDY LOGS ==='
-          docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=180 caddy 2>&1
+          echo '=== LOCAL API THROUGH CURRENT FRONT DOOR ==='
+          curl -vk --connect-timeout 5 --max-time 15 --resolve smarbiz.sbs:443:127.0.0.1 https://smarbiz.sbs/api/health 2>&1
           echo
-          echo '=== PUBLIC IP FROM ORIGIN ==='
-          curl -4 --silent --show-error --max-time 10 https://api.ipify.org 2>&1
-          echo
+          echo '=== CADDY LOG TAIL ==='
+          docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=80 caddy 2>&1
           REMOTE
           STATUS=$?
-          cat /tmp/origin-diagnostics.txt
+          cat /tmp/server-diagnostics.txt
+          cat /tmp/external-diagnostics.txt /tmp/server-diagnostics.txt > /tmp/origin-diagnostics.txt
           exit $STATUS
 
       - name: Upload diagnostics
@@ -87,7 +111,7 @@ jobs:
             const title = '[Deploy] Smarbiz production status';
             let output = 'Diagnostics file was not created.';
             try { output = fs.readFileSync('/tmp/origin-diagnostics.txt', 'utf8').trim(); } catch (_) {}
-            if (output.length > 12000) output = output.slice(-12000);
+            if (output.length > 24000) output = output.slice(-24000);
 
             const {data: issues} = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
@@ -105,7 +129,7 @@ jobs:
               `- Collection outcome: **${process.env.COLLECT_OUTCOME || 'unknown'}**`,
               `- Workflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               '',
-              '<details><summary>Server, firewall, Caddy, and origin checks</summary>',
+              '<details><summary>External reachability, Nginx ownership, certificates, and Caddy</summary>',
               '',
               '```text',
               output.replace(/```/g, "'''"),
