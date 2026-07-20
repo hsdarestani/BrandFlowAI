@@ -1,1 +1,13 @@
-if __name__=='__main__': print('Smarbiz scheduler checks due posts every minute in dev and queues analytics/report jobs.')
+"""Smarbiz Celery beat scheduler process."""
+
+from app.tasks import celery_app
+
+
+if __name__ == "__main__":
+    celery_app.start(
+        [
+            "beat",
+            "--loglevel=INFO",
+            "--pidfile=",
+        ]
+    )

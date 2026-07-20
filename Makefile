@@ -7,7 +7,7 @@ down:
 	docker compose down
 
 api:
-	cd apps/api && uvicorn app.main:app --reload
+	cd apps/api && uvicorn app.entrypoint:app --reload
 
 web:
 	cd apps/web && npm run dev

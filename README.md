@@ -1,15 +1,28 @@
 # Smarbiz
 
-Smarbiz is a multilingual AI Content Operations Platform: **your brand’s AI content manager**. It plans, generates, approves, publishes, analyzes, and learns across English, Persian/Farsi RTL, and German.
+Smarbiz is a multilingual AI-assisted content operations workspace for planning, creating, reviewing, scheduling, publishing, measuring, and improving brand content in English, Persian/Farsi RTL, and German.
+
+## What works end to end
+
+- Secure signup/login, tenant-scoped organizations and brands, and guided onboarding.
+- Brand Pulse knowledge base with products, personas, rules, memory, JSON import/export, and real CRUD.
+- Content Calendar → Content Studio → Approval → Schedule workflow.
+- Public approval links with approve, request-changes, reject, reviewer identity, and history.
+- Campaign planning with generated plan items and idempotent draft/calendar creation.
+- Asset upload, review, metadata management, persistent storage, and authenticated download.
+- Manual or connected analytics, recommendations, and Brand Memory learning.
+- Weekly/custom reports with regenerate, edit, Markdown export, and Brevo email delivery when configured.
+- Celery + Redis worker and beat scheduler for due scheduled posts, atomic claiming, bounded retries, and duplicate-publication protection.
+- Production Docker/Caddy deployment and GitHub Actions CI/deploy.
 
 ## Architecture
 
-- `apps/api`: FastAPI, SQLAlchemy 2.x models, JWT auth, RBAC, AI agents, connector architecture, approval workflow, analytics/report endpoints.
-- `apps/web`: Next.js App Router, TypeScript, Tailwind, Smarbiz Pulse light SaaS UI, locale routes for `en`, `de`, and `fa` with true RTL via `dir="rtl"`.
-- `infra`: reserved for production deployment assets.
-- PostgreSQL + pgvector image, Redis, worker placeholder, scheduler placeholder in Docker Compose.
+- `apps/api`: FastAPI, SQLAlchemy 2.x, Alembic, JWT auth, tenant/RBAC guards, connectors, reports, assets, and Celery jobs.
+- `apps/web`: Next.js App Router, TypeScript, Tailwind, locale routes (`en`, `de`, `fa`), responsive SaaS UI, and true Persian RTL.
+- PostgreSQL + pgvector, Redis, API, worker, scheduler, web, and Caddy in Docker Compose.
+- `apps/api/app/entrypoint.py` is the supported API entrypoint. It preserves the main API surface and installs production route replacements such as secure file streaming and real Brevo report delivery.
 
-## Run locally
+## Run locally with Docker
 
 ```bash
 cp .env.example .env
@@ -18,24 +31,57 @@ make up
 
 Open:
 
-- Web: http://localhost:3000/en
-- API docs: http://localhost:8000/docs
-- Health: http://localhost:8000/health
+- Web: `http://localhost:3000/en`
+- API docs: `http://localhost:8000/docs`
+- API health: `http://localhost:8000/health`
 
-Without Docker:
+Local Docker uses one shared PostgreSQL database, Redis broker, and persistent asset volume for the API, worker, and scheduler.
+
+## Run without Docker
+
+Start PostgreSQL and Redis first, then:
 
 ```bash
-cd apps/api && pip install -r requirements.txt && uvicorn app.main:app --reload
-cd apps/web && npm install && npm run dev
+cd apps/api
+pip install -r requirements.txt
+alembic upgrade head
+uvicorn app.entrypoint:app --reload
 ```
 
+```bash
+cd apps/api
+python worker.py
+```
+
+```bash
+cd apps/api
+python scheduler.py
+```
+
+```bash
+cd apps/web
+npm install
+NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
+```
+
+## Tests and builds
+
+```bash
+make test
+cd apps/web && npm run lint && npm run build
+```
+
+CI also validates the production Compose file and builds all production containers.
+
 ## Seed data
+
+Seed data is intended only for local/demo environments:
 
 ```bash
 make seed
 ```
 
-Demo accounts use password `password123`:
+Demo password: `password123`
 
 | Email | Role |
 |---|---|
@@ -43,81 +89,47 @@ Demo accounts use password `password123`:
 | `owner@demo.com` | org_owner |
 | `client@demo.com` | client_approver |
 
-Seed includes a German aesthetic clinic, Iranian ecommerce shop with Telegram/Bale/WooCommerce, German IT services brand, and agency organization.
+The production login screen shows these shortcuts only when the API explicitly reports Demo Mode.
 
-## Main routes
+## Environment modes
 
-- `/en`, `/de`, `/fa`: landing pages.
-- `/{locale}/auth/login`: login UI placeholder.
-- `/{locale}/app/dashboard`: brand operating cockpit.
-- `/{locale}/app/admin`: Super Admin command center.
-- `/{locale}/public/approval/{token}`: mobile-first public approval preview.
+### Development/demo
 
-## API highlights
+- `APP_ENV=development`
+- `DEMO_MODE=true`
+- `AI_PROVIDER=mock`
+- `ALLOW_MOCK_CONNECTORS=true`
 
-Auth, organizations, brands, onboarding, Brand DNA, memory, calendar generation, draft generation/edit/revise/translate, approvals, public approval token actions, scheduling, publishing, assisted kit, analytics snapshots, weekly reports, assets, campaigns, connector webhooks, Bale, Bale Safir, and Super Admin endpoints are implemented in FastAPI.
+### Public staging
 
-## Real vs mocked
+- real auth, PostgreSQL, Redis, assets, approvals, reports, and background jobs
+- `DEMO_MODE=false`
+- mock external connectors disabled
+- deterministic AI may remain enabled until a real provider key is configured
 
-| Area | Status |
-|---|---|
-| Database models | Real SQLAlchemy foundation with required core models |
-| Auth | Real JWT + bcrypt password hashing |
-| RBAC | Permission matrix foundation |
-| AI | Provider abstraction + deterministic mock agents; OpenAI/Anthropic/Gemini placeholders |
-| Publishing | Real connector interfaces + mock end-to-end publishing |
-| External APIs | Safe skeletons/placeholders only unless simple bot-style calls are configured later |
-| Worker/scheduler | Runnable placeholders with documented job names |
-| Storage | S3/MinIO environment placeholders; asset API mock |
+### Strict production
 
-## Connector status
+Production validation rejects SQLite, weak secrets, Demo Mode, mock AI, mock connectors, wildcard/localhost CORS, and missing connector encryption secret.
 
-| Connector | Direct | Assisted | Analytics | Approval bot | Notes |
-|---|---:|---:|---:|---:|---|
-| Mock | yes | yes | yes | yes | Demo default |
-| Telegram | bot skeleton | yes | limited | yes | Bot token/chat_id placeholder |
-| Bale Bot | bot skeleton | yes | manual/limited | yes | Defaults to `https://tapi.bale.ai/bot<token>/METHOD_NAME` pattern |
-| Bale Safir | no | notifications | no | reminders | Opt-in phone messaging only |
-| Instagram/Facebook | permission-gated placeholder | yes | placeholder | no | Meta review required |
-| TikTok | permission-gated placeholder | yes | placeholder | no | App review required |
-| LinkedIn | OAuth placeholder | yes | placeholder | no | Official API required |
-| Google Business | API placeholder | yes | placeholder | no | Official API required |
-| YouTube | upload placeholder | yes | placeholder | no | Quota-aware TODO |
-| WooCommerce | REST placeholder | n/a | orders/products | no | Credentials required |
-| GA4 | Data API placeholder | n/a | yes | no | Credentials required |
-| Eitaa/Soroush/Aparat | disabled skeleton | yes | no | no | No unsafe automation |
+See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the server layout, DNS, firewall, Cloudflare, Caddy, and GitHub secret requirements.
 
-## Telegram
+## Connector truthfulness
 
-The Telegram connector exposes capabilities for publishing text/photo/video/document/media groups, webhooks, polling, and approval bot buttons. Production requires official Bot API token, channel/group setup, admin permission verification, rate limit handling, and webhook hardening.
+A connector is shown as connected only after saved configuration and a successful test. Integrations that require official OAuth/app review remain unavailable or assisted until those external requirements are completed.
 
-## Bale Bot
+Currently practical direct integrations include public approval links, configured bot-style Telegram/Bale flows, WooCommerce/GA4 data connections where credentials are supplied, and Brevo transactional report email. Instagram/Facebook, LinkedIn, TikTok, YouTube, and Google Business still require official provider apps, OAuth flows, permissions, quotas, and review before direct production publishing can be claimed.
 
-The Bale connector is first-class with provider key `bale`, configurable base URL, mock `send_message`, webhook/poll endpoints, approval button workflow placeholder, error mapping, and assisted publishing fallback.
+## AI providers
 
-## Bale Safir
-
-The Bale Safir connector is separate (`bale_safir`) for direct notification/message use cases. It normalizes Iranian phones (`0912...`, `+98912...`, `98912...`), maps known Safir errors, stores message IDs in mock responses, and requires explicit consent before sending.
+The deterministic provider keeps development and public staging usable without sending brand data to a third party. Strict production requires a real provider configuration and API key. Do not place provider keys in the browser; manage them through server environment variables.
 
 ## Security notes
 
-- No hardcoded production secrets; use `.env`.
-- Public approval tokens are hashed in the database.
-- Passwords use bcrypt.
-- Connectors avoid scraping, browser automation, fake sessions, and policy-violating behavior.
-- Bale Safir is opt-in only and should not be used for unsolicited bulk messaging.
-
-## Production next steps
-
-1. Replace SQLite/dev DB defaults with managed Postgres + pgvector migrations.
-2. Add full Alembic autogeneration and migration lifecycle.
-3. Implement encrypted token storage with KMS.
-4. Add API-level rate limiting and CSRF/session hardening if cookie auth is used.
-5. Complete real OAuth flows and official app reviews per platform.
-6. Add Celery task implementations and Super Admin retry/cancel operations.
-7. Add comprehensive frontend forms wired to API.
-8. Expand tests with TestClient database fixtures and Playwright UI smoke tests.
-
-## Known limitations
-
-This MVP+ foundation works end-to-end using mock AI and mock connectors. Direct publishing to social networks requires official credentials, permissions, and app review where applicable.
+- No production secrets are committed.
+- Passwords are bcrypt-hashed and JWT settings are environment-driven.
+- Public approval tokens are stored hashed.
+- Organization/brand routes are tenant guarded.
+- Super Admin cannot be granted through public signup.
+- Auth endpoints are rate-limited.
+- Asset downloads require a valid tenant-scoped bearer token.
+- Connector credentials are never returned to the browser after saving.
