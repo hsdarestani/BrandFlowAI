@@ -4,7 +4,7 @@ export class ApiError extends Error{status:number;detail:any;constructor(status:
 export const TOKEN_KEY='smarbiz_token';
 export const SESSION_MESSAGE_KEY='smarbiz_session_message';
 function browser(){return typeof window !== 'undefined'}
-function currentLocale(){if(!browser())return 'en';return location.pathname.split('/').filter(Boolean)[0]||'en'}
+function currentLocale(){if(!browser())return 'en';const value=location.pathname.split('/').filter(Boolean)[0]||localStorage.getItem('smarbiz_locale')||'en';return ['fa','en','de'].includes(value)?value:'en'}
 export function getToken(){ if (!browser()) return ''; return localStorage.getItem(TOKEN_KEY) || ''; }
 const networkMessages:any={en:'Could not connect to the backend. Please check your connection and try again.',fa:'اتصال به سرور برقرار نشد. لطفاً اتصال خود را بررسی کنید و دوباره تلاش کنید.',de:'Die Verbindung zum Server konnte nicht hergestellt werden. Bitte prüfen Sie Ihre Verbindung und versuchen Sie es erneut.'};
 const sessionMessages:any={en:'Session expired. Please log in again.',fa:'نشست شما منقضی شده است. لطفاً دوباره وارد شوید.',de:'Ihre Sitzung ist abgelaufen. Bitte melden Sie sich erneut an.'};
@@ -13,8 +13,8 @@ export function clearSession(){ if(browser()){const l=currentLocale();localStora
 export function redirectToLogin(){ if(browser()){const l=currentLocale(); if(!location.pathname.includes('/auth/login')) location.href=`/${l}/auth/login`;}}
 async function request<T>(path:string, options:ApiOptions={}){
   const isForm=typeof FormData!=='undefined' && options.body instanceof FormData;
-  const jwt=getToken();
-  const headers:HeadersInit={...(isForm?{}:{'Content-Type':'application/json'}),...(jwt?{Authorization:`Bearer ${jwt}`}:{ }),...(options.headers||{})};
+  const jwt=getToken();const locale=currentLocale();
+  const headers:HeadersInit={...(isForm?{}:{'Content-Type':'application/json'}),'Accept-Language':locale,'X-Smarbiz-Locale':locale,...(jwt?{Authorization:`Bearer ${jwt}`}:{ }),...(options.headers||{})};
   try{
     const res=await fetch(`${baseUrl}${path}`,{...options,headers});
     if(res.status===401){clearSession(); redirectToLogin(); throw new ApiError(401,sessionMessages[currentLocale()]||sessionMessages.en);}
