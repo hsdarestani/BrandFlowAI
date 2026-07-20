@@ -1,0 +1,46 @@
+name: UI TypeScript Diagnostics
+
+on:
+  push:
+    branches: [agent/persian-activation-redesign]
+    paths: [.github/workflows/ui-ts-debug.yml]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm install
+      - name: Capture type check
+        id: check
+        continue-on-error: true
+        working-directory: apps/web
+        run: npm run lint > /tmp/typescript.log 2>&1
+      - name: Publish diagnostics
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          OUTCOME: ${{ steps.check.outcome }}
+        with:
+          script: |
+            const fs=require('fs');
+            const title='[Debug] Smarbiz UI redesign TypeScript';
+            let log='';try{log=fs.readFileSync('/tmp/typescript.log','utf8')}catch(_){}
+            if(log.length>24000)log=log.slice(-24000);
+            const body=`Commit: \`${context.sha}\`\n\nOutcome: **${process.env.OUTCOME}**\n\n\`\`\`text\n${log.replace(/```/g,"'''")}\n\`\`\``;
+            const {data:issues}=await github.rest.issues.listForRepo({owner:context.repo.owner,repo:context.repo.repo,state:'all',per_page:100});
+            const existing=issues.find(issue=>issue.title===title&&!issue.pull_request);
+            if(existing)await github.rest.issues.update({owner:context.repo.owner,repo:context.repo.repo,issue_number:existing.number,state:'open',body});
+            else await github.rest.issues.create({owner:context.repo.owner,repo:context.repo.repo,title,body});
+      - name: Fail on error
+        if: steps.check.outcome != 'success'
+        run: exit 1
