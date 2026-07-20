@@ -1,0 +1,186 @@
+name: CI and Deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smarbiz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV: development
+      DATABASE_URL: sqlite:///./ci.db
+      JWT_SECRET: ci-only-secret-with-more-than-thirty-two-characters
+      CONNECTOR_SECRET_KEY: ci-only-connector-secret-with-more-than-thirty-two-characters
+      AUTH_RATE_LIMIT_PER_MINUTE: 1000
+      NEXT_PUBLIC_API_URL: /api
+      DEMO_MODE: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: apps/api/requirements.txt
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: pip install -r requirements.txt
+
+      - name: Run API tests
+        working-directory: apps/api
+        run: pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Type-check web
+        working-directory: apps/web
+        run: npm run lint
+
+      - name: Build web
+        working-directory: apps/web
+        run: npm run build
+
+      - name: Validate production Compose
+        run: docker compose --env-file .env.production.example -f docker-compose.prod.yml config --quiet
+
+      - name: Build production containers
+        run: docker compose --env-file .env.production.example -f docker-compose.prod.yml build
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH password client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
+      - name: Package release
+        run: |
+          tar --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='*.db' -czf /tmp/smarbiz-release.tar.gz .
+
+      - name: Upload release
+        env:
+          SSHPASS: ${{ secrets.PASS }}
+        run: |
+          test -n "$SSHPASS" || (echo "GitHub secret PASS is missing" && exit 1)
+          sshpass -e scp -o StrictHostKeyChecking=accept-new /tmp/smarbiz-release.tar.gz root@91.107.157.75:/tmp/smarbiz-release.tar.gz
+
+      - name: Deploy and verify
+        env:
+          SSHPASS: ${{ secrets.PASS }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=accept-new root@91.107.157.75 "RELEASE_SHA='$RELEASE_SHA' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          export DEBIAN_FRONTEND=noninteractive
+          if ! command -v docker >/dev/null 2>&1; then
+            apt-get update
+            apt-get install -y ca-certificates curl openssl
+            curl -fsSL https://get.docker.com | sh
+          fi
+          if ! docker compose version >/dev/null 2>&1; then
+            apt-get update
+            apt-get install -y docker-compose-plugin
+          fi
+
+          BASE=/opt/smarbiz
+          RELEASE="$BASE/releases/$RELEASE_SHA"
+          SHARED="$BASE/shared"
+          mkdir -p "$RELEASE" "$SHARED"
+          rm -rf "$RELEASE"/*
+          tar -xzf /tmp/smarbiz-release.tar.gz -C "$RELEASE"
+          rm -f /tmp/smarbiz-release.tar.gz
+
+          if [ ! -f "$SHARED/.env.production" ]; then
+            umask 077
+            POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+            JWT_SECRET="$(openssl rand -hex 48)"
+            CONNECTOR_SECRET_KEY="$(openssl rand -hex 48)"
+            cat > "$SHARED/.env.production" <<ENV
+          APP_ENV=staging
+          DEMO_MODE=false
+          ALLOW_MOCK_CONNECTORS=false
+          ALLOW_UNSAFE_DEV_DEFAULTS=false
+          REQUIRE_MIGRATIONS=true
+          RUN_MIGRATIONS=true
+          POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+          DATABASE_URL=postgresql+psycopg://smarbiz:$POSTGRES_PASSWORD@postgres:5432/smarbiz
+          REDIS_URL=redis://redis:6379/0
+          JWT_SECRET=$JWT_SECRET
+          JWT_EXPIRES_MINUTES=10080
+          JWT_ISSUER=smarbiz-api
+          CONNECTOR_SECRET_KEY=$CONNECTOR_SECRET_KEY
+          BOOTSTRAP_SUPERADMIN_EMAIL=
+          AUTH_RATE_LIMIT_PER_MINUTE=12
+          AI_PROVIDER=mock
+          OPENAI_API_KEY=
+          ANTHROPIC_API_KEY=
+          GEMINI_API_KEY=
+          CORS_ORIGINS=https://smarbiz.sbs,https://www.smarbiz.sbs
+          NEXT_PUBLIC_API_URL=/api
+          ACME_EMAIL=admin@smarbiz.sbs
+          TELEGRAM_BOT_TOKEN=
+          BALE_BOT_TOKEN=
+          BALE_BASE_URL=https://tapi.bale.ai/bot{token}/{method}
+          BALE_SAFIR_BASE_URL=
+          BALE_SAFIR_API_ACCESS_KEY=
+          BALE_SAFIR_BOT_ID=
+          S3_ENDPOINT=
+          S3_BUCKET=smarbiz-assets
+          ENV
+          fi
+
+          ln -sfn "$SHARED/.env.production" "$RELEASE/.env.production"
+          ln -sfn "$RELEASE" "$BASE/current"
+          cd "$BASE/current"
+
+          docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build --remove-orphans
+
+          READY=0
+          for _ in $(seq 1 45); do
+            if docker compose --env-file .env.production -f docker-compose.prod.yml exec -T api \
+              python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+            sleep 4
+          done
+
+          if [ "$READY" != "1" ]; then
+            docker compose --env-file .env.production -f docker-compose.prod.yml ps
+            docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=200 api postgres
+            exit 1
+          fi
+
+          docker compose --env-file .env.production -f docker-compose.prod.yml exec -T web \
+            node -e "fetch('http://127.0.0.1:3000/en').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+
+          docker image prune -f
+          find "$BASE/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +4 | cut -d' ' -f2- | xargs -r rm -rf
+          docker compose --env-file .env.production -f docker-compose.prod.yml ps
+          REMOTE
