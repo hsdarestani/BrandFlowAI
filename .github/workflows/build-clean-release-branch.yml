@@ -1,0 +1,43 @@
+name: Build clean Smarbiz release branch
+
+on:
+  push:
+    branches: [agent/productionize-and-deploy]
+    paths: [.github/workflows/build-clean-release-branch.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/smarbiz-release
+          fetch-depth: 0
+      - name: Overlay product changes onto latest main
+        run: |
+          git fetch origin main agent/productionize-and-deploy
+          mapfile -t files < <(git diff --name-only origin/main...origin/agent/productionize-and-deploy)
+          for file in "${files[@]}"; do
+            case "$file" in
+              .github/workflows/api-debug.yml|.github/workflows/branch-validation.yml|.github/workflows/typecheck-debug.yml|.github/workflows/ci-deploy.yml|.github/workflows/verify-production.yml|.github/workflows/build-clean-release-branch.yml|.env.production.example|Caddyfile|DEPLOYMENT.md|docker-compose.prod.yml)
+                echo "Preserving main version: $file"
+                continue
+                ;;
+            esac
+            if git cat-file -e "origin/agent/productionize-and-deploy:$file" 2>/dev/null; then
+              git checkout origin/agent/productionize-and-deploy -- "$file"
+            else
+              git rm -f --ignore-unmatch "$file"
+            fi
+          done
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git diff --cached --quiet; then
+            echo 'Release branch already synchronized.'
+            exit 0
+          fi
+          git commit -m 'Apply completed Smarbiz product workflows to latest main'
+          git push origin HEAD:agent/smarbiz-release
