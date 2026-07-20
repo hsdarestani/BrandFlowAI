@@ -1,15 +1,12 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 
 class Settings(BaseSettings):
-    """Central runtime configuration.
-
-    Production must fail fast when a deployment is still using development
-    defaults.  This keeps mock/demo behavior from silently leaking into a real
-    customer workspace.
-    """
+    """Central runtime configuration with fail-fast production validation."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
@@ -23,6 +20,7 @@ class Settings(BaseSettings):
     demo_mode: bool = True
     allow_mock_connectors: bool = False
     allow_unsafe_dev_defaults: bool = False
+    require_migrations: bool = True
 
     cors_origins: str = "http://localhost:3000,https://smarbiz.sbs,https://www.smarbiz.sbs"
     redis_url: str = "redis://redis:6379/0"
@@ -50,7 +48,7 @@ class Settings(BaseSettings):
         if self.demo_mode:
             errors.append("DEMO_MODE must be false in production.")
         if self.ai_provider.lower() == "mock":
-            errors.append("AI_PROVIDER=mock is not allowed in production; configure a real provider or set APP_ENV=staging.")
+            errors.append("AI_PROVIDER=mock is not allowed in production; configure a real provider or use APP_ENV=staging.")
         if self.allow_mock_connectors:
             errors.append("ALLOW_MOCK_CONNECTORS must be false in production.")
         if not self.connector_secret_key or len(self.connector_secret_key) < 32:
@@ -77,6 +75,37 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 class Base(DeclarativeBase):
     pass
+
+
+def _database_has_alembic_version(bind) -> bool:
+    try:
+        with bind.connect() as conn:
+            result = conn.execute(text("select version_num from alembic_version limit 1"))
+            return result.first() is not None
+    except Exception:
+        return False
+
+
+_original_create_all = Base.metadata.create_all
+
+
+def _guarded_create_all(bind=None, *args, **kwargs):
+    """Allow dev bootstrapping, but prohibit unmanaged production DDL."""
+
+    if os.getenv("SMARBIZ_RUNNING_MIGRATIONS") == "1":
+        return _original_create_all(bind=bind, *args, **kwargs)
+
+    if settings.is_production and settings.require_migrations and not settings.allow_unsafe_dev_defaults:
+        if bind is None or not _database_has_alembic_version(bind):
+            raise RuntimeError(
+                "Production database is not migration-managed. Run `alembic upgrade head` "
+                "before starting the API, or set REQUIRE_MIGRATIONS=false only for a one-off recovery."
+            )
+        return None
+    return _original_create_all(bind=bind, *args, **kwargs)
+
+
+Base.metadata.create_all = _guarded_create_all
 
 
 def get_db():
