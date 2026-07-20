@@ -1,0 +1,33 @@
+name: Fix UI syntax
+
+on:
+  push:
+    branches: [agent/persian-activation-redesign]
+    paths: [.github/workflows/fix-ui-syntax.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/persian-activation-redesign
+      - name: Quote hyphenated icon key
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('apps/web/components/app-shell.tsx')
+          text=path.read_text()
+          text=text.replace(",brand-pulse:'",",'brand-pulse':'")
+          path.write_text(text)
+          PY
+      - name: Commit fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web/components/app-shell.tsx
+          git commit -m 'Fix hyphenated app shell icon key'
+          git push origin HEAD:agent/persian-activation-redesign
