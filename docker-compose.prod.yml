@@ -40,8 +40,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: https://smarbiz.sbs,https://www.smarbiz.sbs
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
-    expose:
-      - "8000"
+    ports:
+      - "127.0.0.1:18000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,32 +60,13 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
-    expose:
-      - "3000"
+    ports:
+      - "127.0.0.1:13000:3000"
     depends_on:
       api:
         condition: service_healthy
     security_opt:
       - no-new-privileges:true
-    networks: [smarbiz]
-
-  caddy:
-    image: caddy:2.8-alpine
-    restart: unless-stopped
-    env_file: .env.production
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      web:
-        condition: service_healthy
-      api:
-        condition: service_healthy
     networks: [smarbiz]
 
 networks:
@@ -95,5 +76,3 @@ networks:
 volumes:
   postgres_data:
   redis_data:
-  caddy_data:
-  caddy_config:
