@@ -25,16 +25,17 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          EXPECTED_IP="91.107.157.75"
+          ORIGIN_IP="91.107.157.75"
           REPORT=/tmp/public-verification.txt
           : > "$REPORT"
 
-          echo "Expected IPv4: $EXPECTED_IP" | tee -a "$REPORT"
+          echo "Origin IPv4: $ORIGIN_IP" | tee -a "$REPORT"
           DNS_OK=0
+          IPS=""
           for attempt in $(seq 1 18); do
             IPS="$(getent ahostsv4 smarbiz.sbs 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//')"
             echo "DNS attempt $attempt: ${IPS:-no A record}" | tee -a "$REPORT"
-            if echo " $IPS " | grep -q " $EXPECTED_IP "; then
+            if [ -n "$IPS" ]; then
               DNS_OK=1
               break
             fi
@@ -42,8 +43,14 @@ jobs:
           done
 
           if [ "$DNS_OK" != "1" ]; then
-            echo "DNS verification failed: smarbiz.sbs does not resolve to $EXPECTED_IP." | tee -a "$REPORT"
+            echo "DNS verification failed: smarbiz.sbs has no public IPv4 record." | tee -a "$REPORT"
             exit 1
+          fi
+
+          if echo " $IPS " | grep -q " $ORIGIN_IP "; then
+            echo "DNS routing mode: direct to origin." | tee -a "$REPORT"
+          else
+            echo "DNS routing mode: proxied/CDN (origin IP intentionally hidden)." | tee -a "$REPORT"
           fi
 
           echo "Checking public proxy health..." | tee -a "$REPORT"
