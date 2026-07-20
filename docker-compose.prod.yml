@@ -35,15 +35,59 @@ services:
       context: ./apps/api
     restart: unless-stopped
     env_file: .env.production
-    environment:
+    environment: &api_environment
       DATABASE_URL: postgresql+psycopg://smarbiz:${POSTGRES_PASSWORD}@postgres:5432/smarbiz
       REDIS_URL: redis://redis:6379/0
       CORS_ORIGINS: https://smarbiz.sbs,https://www.smarbiz.sbs
-      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+      RUN_MIGRATIONS: "true"
+      ASSET_STORAGE_ROOT: /app/storage/assets
+      ASSET_MAX_BYTES: ${ASSET_MAX_BYTES:-25000000}
     ports:
       - "127.0.0.1:18000:8000"
+    volumes:
+      - asset_data:/app/storage/assets
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    networks: [smarbiz]
+
+  worker:
+    build:
+      context: ./apps/api
+    restart: unless-stopped
+    command: ["python", "worker.py"]
+    env_file: .env.production
+    environment:
+      <<: *api_environment
+      RUN_MIGRATIONS: "false"
+    volumes:
+      - asset_data:/app/storage/assets
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    networks: [smarbiz]
+
+  scheduler:
+    build:
+      context: ./apps/api
+    restart: unless-stopped
+    command: ["python", "scheduler.py"]
+    env_file: .env.production
+    environment:
+      <<: *api_environment
+      RUN_MIGRATIONS: "false"
+    volumes:
+      - asset_data:/app/storage/assets
+    depends_on:
+      api:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -76,3 +120,4 @@ networks:
 volumes:
   postgres_data:
   redis_data:
+  asset_data:
