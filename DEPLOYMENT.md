@@ -17,7 +17,9 @@ Create these records at the DNS provider:
 | A | `@` | `91.107.157.75` |
 | A | `www` | `91.107.157.75` |
 
-Caddy obtains and renews HTTPS certificates automatically after DNS resolves and ports `80` and `443` reach the server.
+The records may remain proxied through Cloudflare. Caddy obtains and renews the origin HTTPS certificate automatically after ports `80` and `443` reach the server.
+
+The deployment workflow configures UFW for SSH, HTTP, HTTPS, and HTTP/3, then validates Caddy directly on the origin before the separate public Cloudflare verification runs.
 
 ## Server layout
 
@@ -49,6 +51,7 @@ cd /opt/smarbiz/current
 docker compose --env-file .env.production -f docker-compose.prod.yml ps
 docker compose --env-file .env.production -f docker-compose.prod.yml logs -f --tail=200
 docker compose --env-file .env.production -f docker-compose.prod.yml restart api web caddy
+ufw status verbose
 ```
 
 Health endpoints:
