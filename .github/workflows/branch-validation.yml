@@ -1,0 +1,128 @@
+name: Branch Validation
+
+on:
+  push:
+    branches: [agent/productionize-and-deploy]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV: development
+      DATABASE_URL: sqlite:///./branch-validation.db
+      JWT_SECRET: branch-validation-secret-with-more-than-thirty-two-characters
+      CONNECTOR_SECRET_KEY: branch-validation-connector-secret-with-more-than-thirty-two-characters
+      AUTH_RATE_LIMIT_PER_MINUTE: 1000
+      NEXT_PUBLIC_API_URL: /api
+      DEMO_MODE: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: apps/api/requirements.txt
+
+      - name: Install API dependencies
+        working-directory: apps/api
+        run: pip install -r requirements.txt
+
+      - name: API tests
+        id: api
+        continue-on-error: true
+        working-directory: apps/api
+        run: pytest -q --tb=short > /tmp/api.log 2>&1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install web dependencies
+        id: install
+        continue-on-error: true
+        working-directory: apps/web
+        run: npm install > /tmp/npm-install.log 2>&1
+
+      - name: TypeScript
+        id: typescript
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        working-directory: apps/web
+        run: npm run lint > /tmp/typescript.log 2>&1
+
+      - name: Next production build
+        id: nextbuild
+        if: steps.typescript.outcome == 'success'
+        continue-on-error: true
+        working-directory: apps/web
+        run: npm run build > /tmp/next-build.log 2>&1
+
+      - name: Prepare production environment
+        run: cp .env.production.example .env.production
+
+      - name: Validate Compose
+        id: compose
+        continue-on-error: true
+        run: docker compose --env-file .env.production -f docker-compose.prod.yml config > /tmp/compose.log 2>&1
+
+      - name: Build production containers
+        id: dockerbuild
+        if: steps.compose.outcome == 'success'
+        continue-on-error: true
+        run: docker compose --env-file .env.production -f docker-compose.prod.yml build > /tmp/docker-build.log 2>&1
+
+      - name: Publish validation report
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          API: ${{ steps.api.outcome }}
+          INSTALL: ${{ steps.install.outcome }}
+          TYPESCRIPT: ${{ steps.typescript.outcome }}
+          NEXTBUILD: ${{ steps.nextbuild.outcome }}
+          COMPOSE: ${{ steps.compose.outcome }}
+          DOCKERBUILD: ${{ steps.dockerbuild.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '[Debug] Smarbiz branch validation';
+            const stages = [
+              ['API tests', process.env.API, '/tmp/api.log'],
+              ['npm install', process.env.INSTALL, '/tmp/npm-install.log'],
+              ['TypeScript', process.env.TYPESCRIPT, '/tmp/typescript.log'],
+              ['Next build', process.env.NEXTBUILD, '/tmp/next-build.log'],
+              ['Compose', process.env.COMPOSE, '/tmp/compose.log'],
+              ['Docker build', process.env.DOCKERBUILD, '/tmp/docker-build.log'],
+            ];
+            const summary = stages.map(([name,outcome]) => `- ${name}: **${outcome || 'skipped'}**`).join('\n');
+            const failed = stages.filter(([,outcome]) => outcome && outcome !== 'success');
+            const details = failed.map(([name,,path]) => {
+              let log = '';
+              try { log = fs.readFileSync(path, 'utf8'); } catch (_) {}
+              if (log.length > 12000) log = log.slice(-12000);
+              return `\n### ${name}\n\n\`\`\`text\n${log.replace(/```/g, "'''")}\n\`\`\``;
+            }).join('\n');
+            const body = `Commit: \`${context.sha}\`\n\n${summary}${details}`;
+            const {data: issues} = await github.rest.issues.listForRepo({owner:context.repo.owner,repo:context.repo.repo,state:'all',per_page:100});
+            const existing = issues.find(issue => issue.title === title && !issue.pull_request);
+            if (existing) await github.rest.issues.update({owner:context.repo.owner,repo:context.repo.repo,issue_number:existing.number,state:'open',body});
+            else await github.rest.issues.create({owner:context.repo.owner,repo:context.repo.repo,title,body});
+
+      - name: Fail when any validation stage failed
+        if: always()
+        env:
+          API: ${{ steps.api.outcome }}
+          INSTALL: ${{ steps.install.outcome }}
+          TYPESCRIPT: ${{ steps.typescript.outcome }}
+          NEXTBUILD: ${{ steps.nextbuild.outcome }}
+          COMPOSE: ${{ steps.compose.outcome }}
+          DOCKERBUILD: ${{ steps.dockerbuild.outcome }}
+        run: |
+          for value in "$API" "$INSTALL" "$TYPESCRIPT" "$NEXTBUILD" "$COMPOSE" "$DOCKERBUILD"; do
+            test "$value" = success || exit 1
+          done
