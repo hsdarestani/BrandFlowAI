@@ -1,7 +1,12 @@
 .env
+.env.production
+.env.*.local
 __pycache__/
 *.pyc
 .pytest_cache/
 .next/
 node_modules/
 brandflow.db
+smarbiz.db
+*.sqlite
+*.sqlite3
