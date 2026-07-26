@@ -1,5 +1,6 @@
 const faCategory:Record<string,string>={approval:'تأیید',publishing:'انتشار',analytics:'تحلیل',ecommerce:'فروشگاه',email:'ایمیل'};
 const faDifficulty:Record<string,string>={easy:'آسان',medium:'متوسط',hard:'پیشرفته'};
+const faFields:Record<string,string>={'Connection name':'نام اتصال','Bot token':'توکن ربات','Chat / channel ID':'شناسه گفت‌وگو یا کانال','API access key':'کلید دسترسی API','Bot ID':'شناسه ربات','Store URL':'آدرس فروشگاه','Consumer key':'کلید مصرف‌کننده','Consumer secret':'رمز مصرف‌کننده','API key':'کلید API','Sender email':'ایمیل فرستنده','Property ID':'شناسه Property','Service account JSON':'فایل JSON حساب سرویس'};
 
 const faPurpose:Record<string,string>={
  approval_link:'ساخت و اشتراک لینک امن برای بررسی و تأیید محتوا',
@@ -21,6 +22,7 @@ const faPurpose:Record<string,string>={
 
 export function connectorCategoryLabel(locale:string,value:string){return locale==='fa'?(faCategory[value]||value):value}
 export function connectorDifficultyLabel(locale:string,value:string){return locale==='fa'?(faDifficulty[value.toLowerCase()]||value):value}
+export function connectorFieldLabel(locale:string,value:string){return locale==='fa'?(faFields[value]||value):value}
 
 export function localizeConnectorItem(locale:string,item:any){
  if(locale!=='fa'||!item)return item;
