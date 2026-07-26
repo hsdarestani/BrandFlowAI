@@ -44,3 +44,4 @@ jobs:
       - name: Fail on TypeScript error
         if: steps.check.outcome != 'success'
         run: exit 1
+# Trigger after registration.
