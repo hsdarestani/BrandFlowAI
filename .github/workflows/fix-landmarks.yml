@@ -15,32 +15,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: agent/full-app-test-suite
-      - name: Replace nested main landmarks
+      - name: Enforce one application main landmark
         run: |
           python - <<'PY'
           from pathlib import Path
-
-          targets={
-            Path('apps/web/components/calendar/content-calendar.tsx'):'<main className="min-w-0 space-y-4">',
-            Path('apps/web/components/reports-page.tsx'):'<main className="panel min-w-0 p-5 md:p-7">',
-          }
-          for path,opening in targets.items():
-            text=path.read_text()
-            if text.count(opening) != 1:
-              raise SystemExit(f'{path}: expected one nested main opening')
-            start=text.index(opening)
-            close=text.find('</main>',start)
-            if close < 0:
-              raise SystemExit(f'{path}: nested main closing not found')
-            text=text[:start]+text[start:].replace(opening,opening.replace('<main','<section'),1)
-            close=text.find('</main>',start)
-            text=text[:close]+'</section>'+text[close+7:]
+          path=Path('apps/web/e2e/app.spec.ts')
+          text=path.read_text()
+          old="  await expect(page.locator('main')).toBeVisible();"
+          new="  await expect(page.locator('main.app-content')).toBeVisible();\n  await expect(page.locator('main')).toHaveCount(1);"
+          if old not in text:
+            if new not in text:
+              raise SystemExit('Expected main landmark assertion was not found')
+          else:
+            text=text.replace(old,new,1)
             path.write_text(text)
           PY
-      - name: Commit fixes
+      - name: Commit test hardening
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add apps/web/components/calendar/content-calendar.tsx apps/web/components/reports-page.tsx
-          git commit -m 'Remove nested main landmarks'
+          git add apps/web/e2e/app.spec.ts
+          git diff --cached --quiet || git commit -m 'Enforce a single app main landmark'
           git push origin HEAD:agent/full-app-test-suite
