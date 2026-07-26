@@ -138,6 +138,7 @@ test('authenticated tenant data is isolated and every primary module renders wit
   await expect(page.locator('main')).toHaveCount(1);
   await expect(page.locator('body')).not.toContainText(/Application error|Internal Server Error|خطای داخلی سرور/i);
   if(module==='analytics')await expect(page.locator('body')).not.toContainText(/Connect analytics|Publish first content|Group content into campaigns|No insights yet/);
+  if(module==='brand-pulse')await expect(page.locator('body')).not.toContainText(/Brand knowledge|Brand basics|Voice and style|Offer and positioning|Rules and compliance|Brand Pulse guide|Search collections|item\(s\)/);
  }
  expect(failedResponses).toEqual([]);
  expect(runtimeErrors).toEqual([]);
