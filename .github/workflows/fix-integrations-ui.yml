@@ -33,7 +33,7 @@ jobs:
             s=s[:start]+s[start:].replace(opening,'<section className="space-y-4">',1)
             close=s.find('</main>',start);s=s[:close]+'</section>'+s[close+7:]
           s=s.replace('data?.recommended_path.map(step=>','recommended.map(step=>',1)
-          s=s.replace("{item.category} · {item.difficulty}","{connectorCategoryLabel(locale,item.category)} · {connectorDifficultyLabel(locale,item.difficulty)}",1)
+          s=s.replace('{item.category} · {item.difficulty}','{connectorCategoryLabel(locale,item.category)} · {connectorDifficultyLabel(locale,item.difficulty)}',1)
           s=s.replace("{categories.map(item=><option value={item} key={item}>{item==='all'?c.all:item}</option>)}","{categories.map(item=><option value={item} key={item}>{item==='all'?c.all:connectorCategoryLabel(locale,item)}</option>)}",1)
           s=s.replace('data?.alerts.map(alert=>','alerts.map(alert=>',1)
           p.write_text(s)
@@ -51,3 +51,4 @@ jobs:
           git add apps/web/components/integrations-page.tsx apps/web/e2e/app.spec.ts
           git commit -m 'Fix integrations Persian UI and landmarks'
           git push origin HEAD:agent/full-app-test-suite
+# Trigger after workflow registration.
