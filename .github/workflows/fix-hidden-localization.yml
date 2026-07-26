@@ -93,3 +93,4 @@ jobs:
           git add apps/web/components/assets-library.tsx apps/web/components/settings-panel.tsx apps/web/e2e/app.spec.ts
           git commit -m 'Localize asset dialogs and settings details'
           git push origin HEAD:agent/full-app-test-suite
+# Trigger after registration.
