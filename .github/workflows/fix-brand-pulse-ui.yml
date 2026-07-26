@@ -23,11 +23,9 @@ jobs:
           if '@/lib/brand-pulse-localization' not in s:
             s=s.replace("import {statusLabel} from '@/lib/i18n';", "import {statusLabel} from '@/lib/i18n';\nimport {brandPulseFieldLabel,brandPulseGroupLabel,brandPulseStatic,localizeBrandPulseAction} from '@/lib/brand-pulse-localization';",1)
           marker="if(error&&!data)return <section className=\"panel p-8\""
-          pos=s.find(marker)
-          if pos<0:raise SystemExit('error state marker missing')
+          if marker not in s:raise SystemExit('error state marker missing')
           return_marker=" return <div className=\"space-y-6\">"
-          if 'const recommended=' not in s:
-            s=s.replace(return_marker," const recommended=localizeBrandPulseAction(locale,data?.recommended_action);\n"+return_marker,1)
+          if 'const recommended=' not in s:s=s.replace(return_marker," const recommended=localizeBrandPulseAction(locale,data?.recommended_action);\n"+return_marker,1)
           opening='<main className="space-y-6">'
           if opening in s:
             start=s.index(opening);close=s.find('</main>',start)
@@ -37,13 +35,13 @@ jobs:
           s=s.replace('<h3 className="font-black">{title}</h3>','<h3 className="font-black">{brandPulseGroupLabel(locale,title)}</h3>',1)
           s=s.replace('<PulseField key={field} field={field} value={form[field]}','<PulseField key={field} locale={locale} field={field} value={form[field]}',1)
           s=s.replace('function PulseField({field,value,onChange}:any)','function PulseField({locale,field,value,onChange}:any)',1)
-          s=s.replace('{field.replaceAll(\'_\',\' \')}<textarea','{brandPulseFieldLabel(locale,field)}<textarea',1)
+          s=s.replace("{field.replaceAll('_',' ')}<textarea",'{brandPulseFieldLabel(locale,field)}<textarea',1)
           s=s.replace('<h2 className="text-xl font-black">Brand Pulse guide</h2>',"<h2 className=\"text-xl font-black\">{brandPulseStatic(locale,'guide')}</h2>",1)
           s=s.replace('{data?.recommended_action.description}','{recommended?.description}',1)
-          s=s.replace("data?.recommended_action.action_href",'recommended?.action_href',1)
-          s=s.replace("data?.recommended_action.action_label",'recommended?.action_label',1)
-          s=s.replace('>Search collections<input','>{brandPulseStatic(locale,\'search\')}<input',1)
-          s=s.replace('{items.length} item(s)','{items.length} {brandPulseStatic(locale,\'items\')}',1)
+          s=s.replace('data?.recommended_action.action_href','recommended?.action_href',1)
+          s=s.replace('data?.recommended_action.action_label','recommended?.action_label',1)
+          s=s.replace('>Search collections<input',">{brandPulseStatic(locale,'search')}<input",1)
+          s=s.replace('{items.length} item(s)',"{items.length} {brandPulseStatic(locale,'items')}",1)
           p.write_text(s)
 
           p=Path('apps/web/e2e/app.spec.ts');s=p.read_text()
@@ -59,3 +57,4 @@ jobs:
           git add apps/web/components/brand-pulse-page.tsx apps/web/e2e/app.spec.ts
           git commit -m 'Fix Brand Pulse Persian UI and landmarks'
           git push origin HEAD:agent/full-app-test-suite
+# Trigger after workflow registration.
