@@ -71,3 +71,4 @@ function localizeInsightItem(locale:string,item:any){
           git add apps/web/components/insights-page.tsx apps/web/e2e/app.spec.ts
           git commit -m 'Fix insights landmarks and Persian dynamic copy'
           git push origin HEAD:agent/full-app-test-suite
+# Trigger after registration.
