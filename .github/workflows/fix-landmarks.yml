@@ -19,23 +19,22 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          replacements={
-            Path('apps/web/components/calendar/content-calendar.tsx'):[
-              ('<main className="min-w-0 space-y-4">','<section className="min-w-0 space-y-4">'),
-              ('</main><Guide data={data}','</section><Guide data={data}'),
-            ],
-            Path('apps/web/components/reports-page.tsx'):[
-              ('<main className="panel min-w-0 p-5 md:p-7">','<section className="panel min-w-0 p-5 md:p-7">'),
-              ('</main><aside className="space-y-4">','</section><aside className="space-y-4">'),
-            ],
+
+          targets={
+            Path('apps/web/components/calendar/content-calendar.tsx'):'<main className="min-w-0 space-y-4">',
+            Path('apps/web/components/reports-page.tsx'):'<main className="panel min-w-0 p-5 md:p-7">',
           }
-          for path,pairs in replacements.items():
+          for path,opening in targets.items():
             text=path.read_text()
-            for old,new in pairs:
-              count=text.count(old)
-              if count != 1:
-                raise SystemExit(f'{path}: expected one occurrence of {old!r}, found {count}')
-              text=text.replace(old,new)
+            if text.count(opening) != 1:
+              raise SystemExit(f'{path}: expected one nested main opening')
+            start=text.index(opening)
+            close=text.find('</main>',start)
+            if close < 0:
+              raise SystemExit(f'{path}: nested main closing not found')
+            text=text[:start]+text[start:].replace(opening,opening.replace('<main','<section'),1)
+            close=text.find('</main>',start)
+            text=text[:close]+'</section>'+text[close+7:]
             path.write_text(text)
           PY
       - name: Commit fixes
@@ -45,4 +44,3 @@ jobs:
           git add apps/web/components/calendar/content-calendar.tsx apps/web/components/reports-page.tsx
           git commit -m 'Remove nested main landmarks'
           git push origin HEAD:agent/full-app-test-suite
-# Triggered after workflow registration.
