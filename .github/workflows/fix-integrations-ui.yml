@@ -15,40 +15,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: agent/full-app-test-suite
-      - name: Patch integrations page
+      - name: Finish integrations localization
         run: |
           python - <<'PY'
           from pathlib import Path
           p=Path('apps/web/components/integrations-page.tsx');s=p.read_text()
-          if '@/lib/integrations-localization' not in s:
-            s=s.replace("import {statusLabel} from '@/lib/i18n';", "import {statusLabel} from '@/lib/i18n';\nimport {connectorCategoryLabel,connectorDifficultyLabel,localizeConnectorItem,localizeConnectorNotice} from '@/lib/integrations-localization';",1)
-          old="const visible=useMemo(()=>data?.catalog.filter(item=>(category==='all'||item.category===category)&&`${item.label} ${item.provider} ${item.purpose}`.toLowerCase().includes(query.toLowerCase()))||[],[data,category,query]);"
-          new="const visible=useMemo(()=>data?.catalog.filter(item=>(category==='all'||item.category===category)&&`${item.label} ${item.provider} ${item.purpose}`.toLowerCase().includes(query.toLowerCase())).map(item=>localizeConnectorItem(locale,item))||[],[data,category,query,locale]);\n const recommended=(data?.recommended_path||[]).map(item=>localizeConnectorItem(locale,item));\n const alerts=(data?.alerts||[]).map(item=>localizeConnectorNotice(locale,item));"
+          s=s.replace('connectorCategoryLabel,connectorDifficultyLabel,localizeConnectorItem,localizeConnectorNotice','connectorCategoryLabel,connectorDifficultyLabel,connectorFieldLabel,localizeConnectorItem,localizeConnectorNotice',1)
+          old="function choose(item:CatalogItem,list=connections){const existing=list.find(entry=>entry.id===item.connection_id)||null;setSelected(item);setConnection(existing);setConfig({display_name:existing?.display_name||item.label})}"
+          new="function choose(item:CatalogItem,list=connections){const localized=localizeConnectorItem(locale,item) as CatalogItem;const existing=list.find(entry=>entry.id===item.connection_id)||null;setSelected(localized);setConnection(existing);setConfig({display_name:existing?.display_name||item.label})}"
           if old in s:s=s.replace(old,new,1)
-          elif 'const recommended=' not in s:raise SystemExit('visible catalog marker missing')
-          opening='<main className="space-y-4">'
-          if opening in s:
-            start=s.index(opening);close=s.find('</main>',start)
-            if close<0:raise SystemExit('nested integrations main closing missing')
-            s=s[:start]+s[start:].replace(opening,'<section className="space-y-4">',1)
-            close=s.find('</main>',start);s=s[:close]+'</section>'+s[close+7:]
-          s=s.replace('data?.recommended_path.map(step=>','recommended.map(step=>',1)
-          s=s.replace('{item.category} · {item.difficulty}','{connectorCategoryLabel(locale,item.category)} · {connectorDifficultyLabel(locale,item.difficulty)}',1)
-          s=s.replace("{categories.map(item=><option value={item} key={item}>{item==='all'?c.all:item}</option>)}","{categories.map(item=><option value={item} key={item}>{item==='all'?c.all:connectorCategoryLabel(locale,item)}</option>)}",1)
-          s=s.replace('data?.alerts.map(alert=>','alerts.map(alert=>',1)
-          p.write_text(s)
-
-          p=Path('apps/web/e2e/app.spec.ts');s=p.read_text()
-          pulse="  if(module==='brand-pulse')await expect(page.locator('body')).not.toContainText(/Brand knowledge|Brand basics|Voice and style|Offer and positioning|Rules and compliance|Brand Pulse guide|Search collections|item\\(s\\)/);"
-          integration="  if(module==='integrations')await expect(page.locator('body')).not.toContainText(/Share authenticated or tokenized approval links|Send approvals and assisted publishing messages|Send approval requests to Bale|Assisted local publishing|No publishing connector connected|No analytics connector connected| · Easy| · Medium| · Hard/);"
-          if integration not in s:s=s.replace(pulse,pulse+'\n'+integration,1)
+          elif 'const localized=localizeConnectorItem' not in s:raise SystemExit('choose marker missing')
+          s=s.replace('<Field label="Connection name"','<Field label={connectorFieldLabel(locale,\'Connection name\')}',1)
+          s=s.replace("label={`${field.label}${field.required?' *':''}`}","label={`${connectorFieldLabel(locale,field.label)}${field.required?' *':''}`}",1)
           p.write_text(s)
           PY
       - name: Commit fixes
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add apps/web/components/integrations-page.tsx apps/web/e2e/app.spec.ts
-          git commit -m 'Fix integrations Persian UI and landmarks'
+          git add apps/web/components/integrations-page.tsx
+          git commit -m 'Finish integrations drawer localization'
           git push origin HEAD:agent/full-app-test-suite
-# Trigger after workflow registration.
