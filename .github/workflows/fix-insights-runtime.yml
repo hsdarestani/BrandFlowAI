@@ -1,0 +1,73 @@
+name: Fix insights runtime and localization
+
+on:
+  push:
+    branches: [agent/full-app-test-suite]
+    paths: [.github/workflows/fix-insights-runtime.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/full-app-test-suite
+      - name: Patch insights semantics and dynamic Persian copy
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('apps/web/components/insights-page.tsx')
+          text=path.read_text()
+
+          marker="const commonChannels=['instagram','facebook','linkedin','telegram','bale','google_business','youtube','tiktok','website','email','woocommerce','other'];"
+          helper="""const commonChannels=['instagram','facebook','linkedin','telegram','bale','google_business','youtube','tiktok','website','email','woocommerce','other'];
+
+function localizeInsightItem(locale:string,item:any){
+ if(locale!=='fa'||!item)return item;
+ const key=`${item.id||''} ${item.title||''}`.toLowerCase();
+ if(key.includes('analytics'))return {...item,title:'اتصال ابزار تحلیل',description:'GA4 یا ابزار تحلیل پلتفرم را متصل کنید؛ در غیر این صورت متریک‌های واقعی را دستی ثبت کنید.',action_label:'اتصال تحلیل'};
+ if(key.includes('publish'))return {...item,title:'انتشار اولین محتوا',description:'بعد از انتشار یا زمان‌بندی اولین محتوا، بینش‌ها دقیق‌تر و کاربردی‌تر می‌شوند.',action_label:'باز کردن استودیوی محتوا'};
+ if(key.includes('campaign'))return {...item,title:'گروه‌بندی محتوا در کمپین‌ها',description:'اتصال محتوا به کمپین‌ها مقایسه عملکرد و یادگیری از نتایج را ساده‌تر می‌کند.',action_label:'ساخت کمپین'};
+ if(key.includes('no insight'))return {...item,title:'هنوز بینشی وجود ندارد',description:'یک ابزار تحلیل متصل کنید یا اولین متریک واقعی را دستی ثبت کنید.'};
+ return item;
+}"""
+          if 'function localizeInsightItem' not in text:
+            if marker not in text: raise SystemExit('commonChannels marker missing')
+            text=text.replace(marker,helper,1)
+
+          old="const has=(data?.summary.content_with_data_count||0)>0;"
+          new="const has=(data?.summary.content_with_data_count||0)>0;\n const recommendations=(data?.recommendations||[]).map(item=>localizeInsightItem(locale,item));\n const alerts=(data?.alerts||[]).map(item=>localizeInsightItem(locale,item));"
+          if old in text:text=text.replace(old,new,1)
+          elif 'const recommendations=' not in text:raise SystemExit('has marker missing')
+
+          opening='<main className="space-y-5">'
+          if opening in text:
+            start=text.index(opening);close=text.find('</main>',start)
+            if close<0:raise SystemExit('insights nested main closing missing')
+            text=text[:start]+text[start:].replace(opening,'<section className="space-y-5">',1)
+            close=text.find('</main>',start);text=text[:close]+'</section>'+text[close+7:]
+
+          text=text.replace("data?.recommendations.length?", "recommendations.length?")
+          text=text.replace("data.recommendations.map(item=>", "recommendations.map(item=>")
+          text=text.replace("data?.alerts.map(alert=>", "alerts.map(alert=>")
+          path.write_text(text)
+
+          test=Path('apps/web/e2e/app.spec.ts')
+          source=test.read_text()
+          anchor="  await expect(page.locator('body')).not.toContainText(/Application error|Internal Server Error|خطای داخلی سرور/i);"
+          addition=anchor+"\n  if(module==='analytics')await expect(page.locator('body')).not.toContainText(/Connect analytics|Publish first content|Group content into campaigns|No insights yet/);"
+          if addition not in source:
+            if anchor not in source:raise SystemExit('browser assertion marker missing')
+            source=source.replace(anchor,addition,1)
+            test.write_text(source)
+          PY
+      - name: Commit fixes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web/components/insights-page.tsx apps/web/e2e/app.spec.ts
+          git commit -m 'Fix insights landmarks and Persian dynamic copy'
+          git push origin HEAD:agent/full-app-test-suite
