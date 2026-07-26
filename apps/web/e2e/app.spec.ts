@@ -134,7 +134,8 @@ test('authenticated tenant data is isolated and every primary module renders wit
  for(const module of modules){
   const response=await page.goto(`/fa/app/${module}`,{waitUntil:'domcontentloaded'});
   expect(response?.status(),module).toBeLessThan(500);
-  await expect(page.locator('main')).toBeVisible();
+  await expect(page.locator('main.app-content')).toBeVisible();
+  await expect(page.locator('main')).toHaveCount(1);
   await expect(page.locator('body')).not.toContainText(/Application error|Internal Server Error|خطای داخلی سرور/i);
  }
  expect(failedResponses).toEqual([]);
