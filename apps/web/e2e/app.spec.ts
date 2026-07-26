@@ -137,6 +137,7 @@ test('authenticated tenant data is isolated and every primary module renders wit
   await expect(page.locator('main.app-content')).toBeVisible();
   await expect(page.locator('main')).toHaveCount(1);
   await expect(page.locator('body')).not.toContainText(/Application error|Internal Server Error|خطای داخلی سرور/i);
+  if(module==='analytics')await expect(page.locator('body')).not.toContainText(/Connect analytics|Publish first content|Group content into campaigns|No insights yet/);
  }
  expect(failedResponses).toEqual([]);
  expect(runtimeErrors).toEqual([]);
