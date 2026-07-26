@@ -45,3 +45,4 @@ jobs:
           git add apps/web/components/calendar/content-calendar.tsx apps/web/components/reports-page.tsx
           git commit -m 'Remove nested main landmarks'
           git push origin HEAD:agent/full-app-test-suite
+# Triggered after workflow registration.
