@@ -1,0 +1,47 @@
+name: Fix semantic landmarks
+
+on:
+  push:
+    branches: [agent/full-app-test-suite]
+    paths: [.github/workflows/fix-landmarks.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/full-app-test-suite
+      - name: Replace nested main landmarks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          replacements={
+            Path('apps/web/components/calendar/content-calendar.tsx'):[
+              ('<main className="min-w-0 space-y-4">','<section className="min-w-0 space-y-4">'),
+              ('</main><Guide data={data}','</section><Guide data={data}'),
+            ],
+            Path('apps/web/components/reports-page.tsx'):[
+              ('<main className="panel min-w-0 p-5 md:p-7">','<section className="panel min-w-0 p-5 md:p-7">'),
+              ('</main><aside className="space-y-4">','</section><aside className="space-y-4">'),
+            ],
+          }
+          for path,pairs in replacements.items():
+            text=path.read_text()
+            for old,new in pairs:
+              count=text.count(old)
+              if count != 1:
+                raise SystemExit(f'{path}: expected one occurrence of {old!r}, found {count}')
+              text=text.replace(old,new)
+            path.write_text(text)
+          PY
+      - name: Commit fixes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web/components/calendar/content-calendar.tsx apps/web/components/reports-page.tsx
+          git commit -m 'Remove nested main landmarks'
+          git push origin HEAD:agent/full-app-test-suite
