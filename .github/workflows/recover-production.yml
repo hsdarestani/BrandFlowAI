@@ -1,0 +1,145 @@
+name: Recover Smarbiz Production
+
+on:
+  push:
+    branches: [ops/recover-production-20260726]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
+      - name: Diagnose and self-heal production
+        id: recovery
+        continue-on-error: true
+        env:
+          SSHPASS: ${{ secrets.PASS }}
+        run: |
+          set -o pipefail
+          test -n "$SSHPASS" || (echo 'GitHub secret PASS is missing' | tee /tmp/recovery.log; exit 1)
+          sshpass -e ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@91.107.157.75 'bash -s' <<'REMOTE' 2>&1 | tee /tmp/recovery.log
+          set -u
+          BASE=/opt/smarbiz/current
+          ENV_FILE="$BASE/.env.production"
+          COMPOSE_FILE="$BASE/docker-compose.prod.yml"
+
+          echo '=== SYSTEM ==='
+          date -Is
+          uptime
+          df -h /
+          free -h
+
+          echo '=== RELEASE ==='
+          readlink -f /opt/smarbiz/current || true
+          test -d "$BASE" || { echo 'MISSING_CURRENT_RELEASE'; exit 21; }
+          test -f "$ENV_FILE" || { echo 'MISSING_ENV_FILE'; exit 22; }
+          test -f "$COMPOSE_FILE" || { echo 'MISSING_COMPOSE_FILE'; exit 23; }
+          cd "$BASE"
+
+          echo '=== BEFORE ==='
+          docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps || true
+          systemctl is-active nginx || true
+          nginx -t || true
+          curl -fsS --max-time 5 http://127.0.0.1:18000/health || true
+          echo
+          curl -fsSI --max-time 5 http://127.0.0.1:13000/fa | head -n 1 || true
+
+          API_OK=0
+          WEB_OK=0
+          NGINX_OK=0
+          curl -fsS --max-time 5 http://127.0.0.1:18000/health >/dev/null && API_OK=1
+          curl -fsS --max-time 5 http://127.0.0.1:13000/fa >/dev/null && WEB_OK=1
+          systemctl is-active --quiet nginx && nginx -t >/dev/null 2>&1 && NGINX_OK=1
+
+          if [ "$API_OK" != 1 ] || [ "$WEB_OK" != 1 ]; then
+            echo '=== RECOVER CONTAINERS ==='
+            docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --build --remove-orphans
+          fi
+
+          if [ "$NGINX_OK" != 1 ]; then
+            echo '=== RECOVER NGINX ==='
+            nginx -t
+            systemctl restart nginx
+          else
+            systemctl reload nginx || systemctl restart nginx
+          fi
+
+          echo '=== WAIT FOR HEALTH ==='
+          API_OK=0
+          WEB_OK=0
+          for attempt in $(seq 1 45); do
+            curl -fsS --max-time 4 http://127.0.0.1:18000/health >/dev/null && API_OK=1 || API_OK=0
+            curl -fsS --max-time 4 http://127.0.0.1:13000/fa >/dev/null && WEB_OK=1 || WEB_OK=0
+            if [ "$API_OK" = 1 ] && [ "$WEB_OK" = 1 ]; then break; fi
+            sleep 4
+          done
+
+          echo '=== AFTER ==='
+          docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps
+          systemctl --no-pager --full status nginx | sed -n '1,25p' || true
+          echo 'API:'
+          curl -fsS --max-time 8 http://127.0.0.1:18000/health || true
+          echo
+          echo 'WEB:'
+          curl -fsSI --max-time 8 http://127.0.0.1:13000/fa | head -n 1 || true
+          echo 'ORIGIN TLS:'
+          curl -kfsSI --max-time 10 --resolve smarbiz.sbs:443:127.0.0.1 https://smarbiz.sbs/fa | head -n 1 || true
+          echo 'ORIGIN API:'
+          curl -kfsS --max-time 10 --resolve smarbiz.sbs:443:127.0.0.1 https://smarbiz.sbs/api/health || true
+          echo
+
+          if [ "$API_OK" != 1 ] || [ "$WEB_OK" != 1 ]; then
+            echo '=== FAILURE LOGS ==='
+            docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" logs --tail=250 api web postgres redis
+            exit 31
+          fi
+          systemctl is-active --quiet nginx || exit 32
+          curl -kfsS --max-time 10 --resolve smarbiz.sbs:443:127.0.0.1 https://smarbiz.sbs/api/health | grep -q '"ok"[[:space:]]*:[[:space:]]*true' || exit 33
+          curl -kfsS --max-time 10 --resolve smarbiz.sbs:443:127.0.0.1 https://smarbiz.sbs/fa >/dev/null || exit 34
+          echo 'RECOVERY_SUCCESS'
+          REMOTE
+
+      - name: Publish recovery report
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          RECOVERY_OUTCOME: ${{ steps.recovery.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '[Ops] Smarbiz live recovery';
+            let log = '';
+            try { log = fs.readFileSync('/tmp/recovery.log', 'utf8'); } catch (_) {}
+            if (log.length > 28000) log = log.slice(-28000);
+            const success = process.env.RECOVERY_OUTCOME === 'success' && log.includes('RECOVERY_SUCCESS');
+            const body = [
+              `## ${success ? '✅ Recovered and healthy' : '❌ Recovery needs attention'}`,
+              '',
+              `- Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              `- SSH/recovery outcome: **${process.env.RECOVERY_OUTCOME}**`,
+              `- Checked at: ${new Date().toISOString()}`,
+              '',
+              '```text',
+              log.replace(/```/g, "'''"),
+              '```',
+            ].join('\n');
+            const {data: issues} = await github.rest.issues.listForRepo({owner:context.repo.owner, repo:context.repo.repo, state:'all', per_page:100});
+            const existing = issues.find(issue => issue.title === title && !issue.pull_request);
+            if (existing) await github.rest.issues.update({owner:context.repo.owner, repo:context.repo.repo, issue_number:existing.number, state:'open', body});
+            else await github.rest.issues.create({owner:context.repo.owner, repo:context.repo.repo, title, body});
+
+      - name: Fail when recovery failed
+        if: steps.recovery.outcome != 'success'
+        run: exit 1
