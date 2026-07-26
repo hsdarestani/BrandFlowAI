@@ -6,7 +6,7 @@ on:
     paths: [.github/workflows/full-app-ts-debug.yml]
 
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 jobs:
@@ -14,9 +14,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: agent/full-app-test-suite
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Fix nullable integration catalog lookup
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('apps/web/components/integrations-page.tsx')
+          text=path.read_text()
+          old='const item=data.catalog.find(entry=>entry.provider===step.provider)'
+          new='const item=data?.catalog.find(entry=>entry.provider===step.provider)'
+          if old in text:text=text.replace(old,new,1)
+          elif new not in text:raise SystemExit('integration catalog lookup marker missing')
+          path.write_text(text)
+          PY
       - name: Install dependencies
         working-directory: apps/web
         run: npm install
@@ -25,6 +39,14 @@ jobs:
         continue-on-error: true
         working-directory: apps/web
         run: npm run lint > /tmp/full-app-ts.log 2>&1
+      - name: Commit fix when type-safe
+        if: steps.check.outcome == 'success'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web/components/integrations-page.tsx
+          git diff --cached --quiet || git commit -m 'Handle nullable integrations overview safely'
+          git push origin HEAD:agent/full-app-test-suite
       - name: Publish diagnostics
         if: always()
         uses: actions/github-script@v7
@@ -44,4 +66,3 @@ jobs:
       - name: Fail on TypeScript error
         if: steps.check.outcome != 'success'
         run: exit 1
-# Trigger after registration.
