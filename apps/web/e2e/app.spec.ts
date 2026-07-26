@@ -66,7 +66,7 @@ test('root locale, Persian direction, font, and auth copy are correct',async({pa
  await expect(page.getByRole('heading',{name:'خوش برگشتی'})).toBeVisible();
  const loginText=await page.locator('body').innerText();
  for(const stale of ['Brand-aware','Approval-ready','Measured'])expect(loginText).not.toContain(stale);
- await page.locator('a[href="/en/auth/login"]').click();
+ await page.getByRole('button',{name:'English'}).click();
  await expect(page).toHaveURL(/\/en\/auth\/login/);
  await expect(page.getByRole('heading',{name:'Welcome back'})).toBeVisible();
 });
