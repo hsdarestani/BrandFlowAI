@@ -28,7 +28,8 @@ jobs:
         id: verify
         continue-on-error: true
         run: |
-          cat > /tmp/verify-mobile.mjs <<'JS'
+          set -o pipefail
+          cat > verify-mobile.mjs <<'JS'
           import {chromium} from 'playwright';
           import fs from 'node:fs';
 
@@ -73,7 +74,7 @@ jobs:
           const api=await fetch(`${base}/api/health`).then(response=>response.text());
           fs.writeFileSync('/tmp/mobile-report.txt',[`Checked: ${new Date().toISOString()}`,`Account: ${email}`,`API: ${api}`,...rows,'PUBLIC_MOBILE_SUCCESS'].join('\n'));
           JS
-          node /tmp/verify-mobile.mjs 2>&1 | tee /tmp/mobile-command.log
+          node verify-mobile.mjs 2>&1 | tee /tmp/mobile-command.log
       - name: Build report
         if: always()
         run: |
