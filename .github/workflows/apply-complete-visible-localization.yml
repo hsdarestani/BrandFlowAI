@@ -1,0 +1,115 @@
+name: Apply complete visible localization
+
+on:
+  push:
+    branches: [agent/fix-localization-mobile-ui]
+    paths: [.github/workflows/apply-complete-visible-localization.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-localization-mobile-ui
+      - name: Localize all audited product surfaces
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def patch(path, replacements):
+              p=Path(path); text=p.read_text()
+              for old,new,required in replacements:
+                  if old not in text:
+                      if required: raise SystemExit(f'{path}: marker not found: {old[:100]}')
+                      continue
+                  text=text.replace(old,new)
+              p.write_text(text)
+
+          patch('apps/web/app/[locale]/app/content-studio/page.tsx',[
+            ("import {localizeRequirementList,normalizeWorkspaceHref,workspaceOptionLabel} from '@/lib/workspace-localization';", "import {localizeRequirementList,normalizeWorkspaceHref,workspaceOptionLabel} from '@/lib/workspace-localization';\nimport {localizeStudioRule} from '@/lib/known-copy-localization';", True),
+            ("const data=await api.get<StudioOverview>('/studio/overview');setOverview(data);", "const raw=await api.get<StudioOverview>('/studio/overview');const data={...raw,brand_rules:(raw.brand_rules||[]).map(rule=>localizeStudioRule(locale,rule))};setOverview(data);", True),
+          ])
+
+          patch('apps/web/components/calendar/content-calendar.tsx',[
+            ("import {statusLabel, t} from '@/lib/i18n';", "import {statusLabel, t} from '@/lib/i18n';\nimport {localizeRequirementList,normalizeWorkspaceHref,workspaceOptionLabel} from '@/lib/workspace-localization';\nimport {connectionStateLabel,localizeKnownText,localizeWorkspacePayload} from '@/lib/known-copy-localization';", True),
+            ("const result=await api.get<CalendarOverview>(`/calendar/overview?${query}`);setData(result);", "const result=localizeWorkspacePayload(locale,await api.get<CalendarOverview>(`/calendar/overview?${query}`));setData(result);", True),
+            ("setError(e?.message||'Calendar API failed')", "setError(locale==='en'?(e?.message||c.error):c.error)", True),
+            ("if(requirements)setMissing(requirements);toast(detail?.message||e?.message||'Generation failed')", "if(requirements)setMissing(localizeRequirementList(locale,requirements));toast(locale==='en'?(detail?.message||e?.message||'Generation failed'):(locale==='fa'?'ساخت هفته انجام نشد.':'Woche konnte nicht generiert werden.'))", True),
+            ("{item.label}{item.connected?'':' · not connected'}", "{workspaceOptionLabel(locale,'channel',item.id)}{item.connected?'':` · ${connectionStateLabel(locale,false)}`}", True),
+            ("data.filters.content_types.map((item:any)=><option key={item.id} value={item.id}>{item.label}</option>)", "data.filters.content_types.map((item:any)=><option key={item.id} value={item.id}>{workspaceOptionLabel(locale,'contentType',item.id)}</option>)", True),
+            (">Clear filters</button>", ">{localizeKnownText(locale,'Clear filters')}</button>", True),
+            ("titleCase(item.channel)", "workspaceOptionLabel(locale,'channel',item.channel)", False),
+            ("titleCase(item.content_type)", "workspaceOptionLabel(locale,'contentType',item.content_type)", False),
+            ("titleCase(channel)", "workspaceOptionLabel(locale,'channel',channel)", False),
+            ("titleCase(type)", "workspaceOptionLabel(locale,'contentType',type)", False),
+            ("{['Title','Channel','Type','Status','Scheduled','Owner','Warnings'].map(label=><th key={label}>{label}</th>)}", "{(locale==='fa'?['عنوان','کانال','نوع محتوا','وضعیت','زمان‌بندی','مسئول','هشدارها']:locale==='de'?['Titel','Kanal','Inhaltstyp','Status','Geplant','Verantwortlich','Warnungen']:['Title','Channel','Type','Status','Scheduled','Owner','Warnings']).map(label=><th key={label}>{label}</th>)}", True),
+            ("href={`/${locale}${data.setup.missing_requirements[0].action_href}`}", "href={`/${locale}${normalizeWorkspaceHref(data.setup.missing_requirements[0].action_href)}`}", True),
+            ("href={`/${locale}${item.action_href}`}", "href={`/${locale}${normalizeWorkspaceHref(item.action_href)}`}", True),
+            ("label=\"Missing dates\"", "label={localizeKnownText(locale,'Missing dates')}", True),
+          ])
+
+          patch('apps/web/components/campaigns-page.tsx',[
+            ("import {statusLabel} from '@/lib/i18n';", "import {statusLabel} from '@/lib/i18n';\nimport {workspaceOptionLabel} from '@/lib/workspace-localization';\nimport {localizeKnownText} from '@/lib/known-copy-localization';", True),
+            ("toast(`${c.name} is required`)", "toast(locale==='fa'?`${c.name} الزامی است`:locale==='de'?`${c.name} ist erforderlich`:`${c.name} is required`)", True),
+            ("toast('End date cannot be before start date')", "toast(locale==='fa'?'تاریخ پایان نمی‌تواند قبل از تاریخ شروع باشد.':locale==='de'?'Das Enddatum darf nicht vor dem Startdatum liegen.':'End date cannot be before start date')", True),
+            ('placeholder="Search campaigns"', "placeholder={localizeKnownText(locale,'Search campaigns')}", True),
+            ('<option value="all">All statuses</option>', "<option value=\"all\">{localizeKnownText(locale,'All statuses')}</option>", True),
+            ('<h2 className="text-2xl font-black">No matching campaigns</h2>', "<h2 className=\"text-2xl font-black\">{localizeKnownText(locale,'No matching campaigns')}</h2>", True),
+            ("item.goal||'No goal'", "item.goal||localizeKnownText(locale,'No goal')", True),
+            ('<Mini label="Ideas"', "<Mini label={localizeKnownText(locale,'Ideas')}", True),
+            ('<Mini label="Drafts"', "<Mini label={localizeKnownText(locale,'Drafts')}", True),
+            ('<Mini label="Scheduled"', "<Mini label={localizeKnownText(locale,'Scheduled')}", True),
+            ('<Mini label="Published"', "<Mini label={localizeKnownText(locale,'Published')}", True),
+            ('>{channel}</span>', ">{workspaceOptionLabel(locale,'channel',channel)}</span>", False),
+            ("detail.description||detail.goal||'No description'", "detail.description||detail.goal||localizeKnownText(locale,'No description')", True),
+            ('>Open Studio</Link>', ">{localizeKnownText(locale,'Open Studio')}</Link>", True),
+            ('>Open Calendar</Link>', ">{localizeKnownText(locale,'Open Calendar')}</Link>", True),
+            ("{item.channel} · {item.content_type}", "{workspaceOptionLabel(locale,'channel',item.channel)} · {workspaceOptionLabel(locale,'contentType',item.content_type)}", True),
+            ('>Draft</Link>', ">{localizeKnownText(locale,'Draft')}</Link>", True),
+            ('>Calendar</Link>', ">{localizeKnownText(locale,'Calendar')}</Link>", True),
+          ])
+
+          patch('apps/web/components/reports-page.tsx',[
+            ("import {statusLabel} from '@/lib/i18n';", "import {statusLabel} from '@/lib/i18n';\nimport {deepLocalizeKnownCopy,localizeKnownText,localizeMetricLabel,localizeWorkspacePayload} from '@/lib/known-copy-localization';", True),
+            ("setData(await api.get<Overview>('/reports/overview'))", "setData(localizeWorkspacePayload(locale,await api.get<Overview>('/reports/overview')))", True),
+            ("setDetail(await api.get<ReportDetail>(`/reports/${id}`))", "setDetail(deepLocalizeKnownCopy(locale,await api.get<ReportDetail>(`/reports/${id}`)))", True),
+            ("const result=await api.post<ReportDetail>('/reports/generate-weekly'", "const raw=await api.post<ReportDetail>('/reports/generate-weekly'", True),
+            ("});setDetail(result);setModal(null);toast(c.generate)", "});const result=deepLocalizeKnownCopy(locale,raw);setDetail(result);setModal(null);toast(c.generate)", True),
+            ("const result=await api.post<ReportDetail>(`/reports/${detail.id}/regenerate`,{});setDetail(result);", "const raw=await api.post<ReportDetail>(`/reports/${detail.id}/regenerate`,{});const result=deepLocalizeKnownCopy(locale,raw);setDetail(result);", True),
+            ('placeholder="Search reports"', "placeholder={localizeKnownText(locale,'Search reports')}", True),
+            ("<Metric label={key.replaceAll('_',' ')}", "<Metric label={localizeMetricLabel(locale,key)}", True),
+          ])
+
+          patch('apps/web/components/settings-panel-v2.tsx',[
+            ("import {useToast} from './ui/toast';", "import {useToast} from './ui/toast';\nimport {localizeRequirementList,normalizeWorkspaceHref} from '@/lib/workspace-localization';\nimport {deepLocalizeKnownCopy,localizeWorkspacePayload} from '@/lib/known-copy-localization';", True),
+            ("const result=await api.get<Overview>('/settings/overview');setData(result);", "const result=localizeWorkspacePayload(locale,await api.get<Overview>('/settings/overview'));setData(result);", True),
+            ("const steps=useMemo(()=>data?.setup?.steps?.map((step:any)=>localizeStep(locale,step))||[],[data,locale]);", "const steps=useMemo(()=>localizeRequirementList(locale,data?.setup?.steps),[data,locale]);", True),
+            ("const alerts=useMemo(()=>data?.alerts?.map((alert:any)=>localizeAlert(locale,alert))||[],[data,locale]);", "const alerts=useMemo(()=>deepLocalizeKnownCopy(locale,data?.alerts||[]),[data,locale]);", True),
+            ("href={`/${locale}${step.action_href}`}", "href={`/${locale}${normalizeWorkspaceHref(step.action_href)}`}", True),
+            ("href={`/${locale}${nextStep?.action_href||'/app/dashboard'}`}", "href={`/${locale}${normalizeWorkspaceHref(nextStep?.action_href)}`}", True),
+            ("href={`/${locale}${alert.href||'/app/dashboard'}`}", "href={`/${locale}${normalizeWorkspaceHref(alert.href)}`}", True),
+          ])
+
+          patch('apps/web/lib/integrations-localization.ts',[
+            ("if(key.includes('publishing'))return", "if(key.includes('approval'))return {...item,title:'روش تأییدی متصل نیست',description:'لینک عمومی تأیید را فعال کنید یا تلگرام/بله را متصل کنید.'};\n if(key.includes('publishing'))return", True),
+          ])
+
+          patch('apps/web/components/app-shell.module.css',[
+            (".shellRoot :global(.mobile-sheet-header){display:flex;align-items:center;gap:.75rem;padding:.25rem .2rem .75rem}", ".shellRoot :global(.mobile-sheet-header){display:flex;align-items:center;justify-content:space-between;gap:.75rem;padding:.25rem .2rem .75rem}\n .shellRoot :global(.mobile-sheet-header>.language-switcher){flex:0 0 auto;min-width:126px}\n .shellRoot :global(.mobile-sheet-header .language-option){flex:0 0 38px;min-width:38px;height:38px}", True),
+          ])
+
+          patch('apps/web/e2e/localization.spec.ts',[
+            ("getByRole('button',{name:'Persian'}).click()", "getByRole('button',{name:'فارسی'}).click()", True),
+          ])
+          PY
+      - name: Commit localization fixes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web
+          git commit -m 'Localize every audited Persian product surface'
+          git push origin HEAD:agent/fix-localization-mobile-ui
