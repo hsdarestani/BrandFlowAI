@@ -54,7 +54,7 @@ const normalizeLocale=(locale:string):Locale=>locale==='fa'||locale==='de'?local
 
 export function normalizeWorkspaceHref(href?:string){
  if(!href)return '/app/dashboard';
- return href.replace('/app/brand-dna','/app/brand-pulse');
+ return href.replace('/app/brand-pulse','/app/brand-pulse');
 }
 
 export function localizeSetupRequirement(locale:string,item:any){
