@@ -32,3 +32,4 @@ jobs:
           git add apps/web/lib/workspace-localization.ts
           git commit -m 'Localize approval link channel label'
           git push origin HEAD:agent/fix-localization-mobile-ui
+# Trigger after workflow registration.
