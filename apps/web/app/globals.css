@@ -145,5 +145,5 @@ body:after{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opac
 @keyframes shimmer{100%{transform:translateX(100%)}}
 @keyframes pulse-ring{0%{transform:scale(.75);opacity:.65}75%,100%{transform:scale(1.7);opacity:0}}
 
-@media (max-width:767px){.activation-hero{border-radius:20px}.panel,.card,.command-card{border-radius:16px}.app-content{padding:1rem}.btn,.chip{min-height:42px}}
+@media (max-width:767px){.activation-hero{border-radius:20px}.panel,.card,.command-card{border-radius:16px}.app-content{padding:1rem}.btn,.chip{min-height:42px}.language-option{min-width:40px;height:40px}.language-switcher{padding:2px}}
 @media (prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
