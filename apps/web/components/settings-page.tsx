@@ -1,1 +1,1 @@
-export {SettingsPanel as SettingsPage} from './settings-panel';
+export {SettingsPanelV2 as SettingsPage} from './settings-panel-v2';

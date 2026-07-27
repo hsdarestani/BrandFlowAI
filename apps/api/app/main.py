@@ -59,7 +59,7 @@ def normalize_status(status):
 def setup_state(db:Session,b):
     if not b: return {'can_generate_week':False,'missing_requirements':[]}
     missing=[]
-    if not db.query(m.BrandDNA).filter_by(brand_id=b.id).first(): missing.append({'id':'brand_pulse','title':'Brand Pulse not completed','action_href':'/app/brand-dna'})
+    if not db.query(m.BrandDNA).filter_by(brand_id=b.id).first(): missing.append({'id':'brand_pulse','title':'Brand Pulse not completed','action_href':'/app/brand-pulse'})
     if db.query(m.ProductService).filter_by(brand_id=b.id).count()==0: missing.append({'id':'product_service','title':'No product/service added','action_href':'/app/settings'})
     if db.query(m.ChannelAccount).filter_by(brand_id=b.id).count()==0: missing.append({'id':'channels','title':'No channels selected','action_href':'/app/integrations'})
     if not any(a.connection_status in ('connected','mock_connected','mock') for a in db.query(m.ChannelAccount).filter_by(brand_id=b.id).all()): missing.append({'id':'approval','title':'No approval method connected','action_href':'/app/integrations'})
@@ -104,8 +104,8 @@ def build_home_overview(db:Session,u):
     reports=db.query(m.WeeklyReport).filter_by(brand_id=brand.id).count() if brand else 0
     step_defs=[
       ('create_brand','Create brand','Create your first brand workspace.',bool(brand),True,5,'Create brand','/onboarding'),
-      ('brand_pulse','Complete Brand Pulse / Brand DNA','Teach Smarbiz your voice, offers, and rules.',bool(dna),bool(brand),15,'Complete Brand Pulse','/app/brand-dna'),
-      ('product_service','Add product/service','Add at least one offer to promote.',products>0,bool(dna),8,'Add product/service','/app/brand-dna?section=offers'),
+      ('brand_pulse','Complete Brand Pulse / Brand DNA','Teach Smarbiz your voice, offers, and rules.',bool(dna),bool(brand),15,'Complete Brand Pulse','/app/brand-pulse'),
+      ('product_service','Add product/service','Add at least one offer to promote.',products>0,bool(dna),8,'Add product/service','/app/brand-pulse?section=offers'),
       ('content_channels','Choose content channels','Select the channels you want to publish to.',channels>0,products>0,5,'Choose channels','/app/integrations'),
       ('approval_method','Connect at least one approval method','Connect an approval path for reviews.',approval_methods>0,channels>0,5,'Connect approval channel','/app/integrations?type=approval'),
       ('generate_week','Generate first week','Create your first weekly content plan.',calendar_count>0,approval_methods>0,10,'Generate first week','/app/calendar?generate=1'),

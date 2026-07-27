@@ -1,0 +1,39 @@
+.root{min-width:0}
+.root :global(.studio-hero-actions),.root :global(.brand-pulse-actions){display:flex;flex-wrap:wrap;align-items:center;gap:.55rem}
+.root :global(.studio-requirements),.root :global(.brand-pulse-missing){border:1px solid #fde0b5;border-radius:18px;background:linear-gradient(135deg,#fffaf1,#fff 72%);padding:1rem;box-shadow:0 8px 24px rgba(180,83,9,.055)}
+.root :global(.studio-requirement-card){display:flex;min-height:72px;align-items:center;gap:.7rem;border:1px solid #ecd9bd;border-radius:15px;background:rgba(255,255,255,.92);padding:.8rem;color:#4a3a25;transition:border-color .18s ease,box-shadow .18s ease,transform .18s ease}
+.root :global(.studio-requirement-card:hover){border-color:#e7bd78;box-shadow:0 9px 22px rgba(180,83,9,.09);transform:translateY(-1px)}
+.root :global(.studio-requirement-index){display:grid;width:32px;height:32px;flex:0 0 32px;place-items:center;border-radius:10px;background:#fff1d6;color:#a65308;font-size:.8rem;font-weight:900}
+.root :global(details>summary){list-style:none}
+.root :global(details>summary::-webkit-details-marker){display:none}
+.root :global(.studio-summary){display:flex;min-height:44px;cursor:pointer;align-items:center;justify-content:space-between;gap:.75rem;user-select:none}
+.root :global(.summary-chevron){display:grid;width:32px;height:32px;flex:0 0 32px;place-items:center;border-radius:10px;background:#f1f5f9;color:#64748b;transition:transform .2s ease,background .2s ease}
+.root :global(details[open]>.studio-summary .summary-chevron),.root :global(.brand-pulse-group[open]>summary .summary-chevron){transform:rotate(180deg);background:#e8edff;color:#3157d5}
+.root :global(.studio-details-body){animation:pageDetails .2s ease both}
+.root :global(.studio-tools){display:flex;max-width:100%;gap:.5rem;overflow-x:auto;padding-bottom:.35rem;scrollbar-width:thin;overscroll-behavior-inline:contain}
+.root :global(.studio-tools>.chip),.root :global(.studio-tools>select){flex:0 0 auto;white-space:nowrap}
+.root :global(.studio-editor){overflow:hidden}
+.root :global(.brand-pulse-group){overflow:hidden;border:1px solid #e2e8f0;border-radius:16px;background:#fff}
+.root :global(.brand-pulse-group>summary){display:flex;min-height:64px;cursor:pointer;align-items:center;justify-content:space-between;gap:.75rem;padding:.85rem 1rem;background:linear-gradient(135deg,#fff,#f8faff);user-select:none}
+.root :global(.brand-pulse-group[open]>summary){border-bottom:1px solid #e8edf4;background:linear-gradient(135deg,#f7f9ff,#fff)}
+.root :global(.brand-pulse-group>div){padding:0 1rem 1rem;animation:pageDetails .2s ease both}
+.root :global(.brand-pulse-item){border:1px solid #e2e8f0;border-radius:16px;background:linear-gradient(145deg,#fff,#fbfcfe);padding:1rem;transition:border-color .18s ease,box-shadow .18s ease,transform .18s ease}
+.root :global(.brand-pulse-item:hover){border-color:#cbd5e1;box-shadow:0 10px 28px rgba(15,23,42,.07);transform:translateY(-1px)}
+.root :global(.brand-pulse-builder){background:linear-gradient(145deg,rgba(255,255,255,.98),rgba(248,251,255,.98))}
+
+@media (max-width:767px){
+ .root :global(.studio-hero-actions),.root :global(.brand-pulse-actions){display:grid;width:100%;grid-template-columns:repeat(2,minmax(0,1fr))}
+ .root :global(.studio-hero-actions>.badge),.root :global(.brand-pulse-actions>.btn){grid-column:1/-1}
+ .root :global(.studio-hero-actions>.btn),.root :global(.studio-hero-actions>.chip),.root :global(.brand-pulse-actions>.btn),.root :global(.brand-pulse-actions>.chip){width:100%;min-width:0}
+ .root :global(.brand-pulse-actions>label){width:100%}
+ .root :global(.studio-requirements),.root :global(.brand-pulse-missing){border-radius:16px;padding:.85rem}
+ .root :global(.studio-requirement-card){min-height:66px;padding:.72rem}
+ .root :global(.studio-layout),.root :global(.brand-pulse-layout){gap:.75rem}
+ .root :global(.studio-brief),.root :global(.studio-editor),.root :global(.brand-pulse-builder){border-radius:16px}
+ .root :global(.studio-editor textarea){min-height:220px}
+ .root :global(.brand-pulse-group>summary){min-height:58px;padding:.75rem .85rem}
+ .root :global(.brand-pulse-group>div){padding:0 .85rem .85rem}
+ .root :global(.brand-pulse-item){padding:.85rem}
+}
+
+@keyframes pageDetails{from{opacity:.35;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}

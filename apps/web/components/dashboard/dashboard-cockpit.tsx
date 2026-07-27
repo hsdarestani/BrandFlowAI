@@ -6,8 +6,9 @@ import {useEffect,useMemo,useState} from 'react';
 import {api,HomeOverview} from '@/lib/api';
 import {localizeHomeOverview,productCopy} from '@/lib/product-copy';
 import {statusLabel} from '@/lib/i18n';
+import {normalizeWorkspaceHref} from '@/lib/workspace-localization';
 
-const href=(locale:string,value?:string)=>`/${locale}${value||'/app/dashboard'}`;
+const href=(locale:string,value?:string)=>`/${locale}${normalizeWorkspaceHref(value)}`;
 const tone=(status:string)=>status==='done'?'done':status==='in_progress'?'current':'';
 
 function Loading(){return <div className="space-y-5"><div className="skeleton h-72 rounded-[26px]"/><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">{[1,2,3,4].map(item=><div className="skeleton h-40 rounded-[18px]" key={item}/>)}</div></div>}

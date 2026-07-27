@@ -43,6 +43,7 @@ export function localizeConnectorItem(locale:string,item:any){
 export function localizeConnectorNotice(locale:string,item:any){
  if(locale!=='fa'||!item)return item;
  const key=(String(item.id||'')+' '+String(item.title||'')).toLowerCase();
+ if(key.includes('approval'))return {...item,title:'روش تأییدی متصل نیست',description:'لینک عمومی تأیید را فعال کنید یا تلگرام/بله را متصل کنید.'};
  if(key.includes('publishing'))return {...item,title:'هیچ مسیر انتشاری متصل نیست',description:'حداقل یک کانال انتشار یا بسته انتشار کمکی را تنظیم کنید.'};
  if(key.includes('analytics'))return {...item,title:'هیچ ابزار تحلیلی متصل نیست',description:'گوگل آنالیتیکس ۴ را متصل کنید یا متریک‌های واقعی را دستی وارد کنید.'};
  return item;
