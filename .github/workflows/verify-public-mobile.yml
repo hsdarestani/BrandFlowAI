@@ -1,0 +1,108 @@
+name: Verify Smarbiz Public Mobile
+
+on:
+  push:
+    branches: [ops/recover-production-20260726]
+    paths: [.github/workflows/verify-public-mobile.yml,.github/public-mobile-trigger.txt]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  verify-mobile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Playwright
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm install @playwright/test@1.52.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Run public mobile checks
+        id: verify
+        continue-on-error: true
+        run: |
+          cat > /tmp/verify-mobile.mjs <<'JS'
+          import {chromium} from 'playwright';
+          import fs from 'node:fs';
+
+          const base='https://smarbiz.sbs';
+          const email=`public-mobile-${Date.now()}@example.com`;
+          const signup=await fetch(`${base}/api/auth/signup`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Public Mobile Test',organization_name:'Public Mobile Test',email,password:'StrongPass123!',preferred_language:'fa',locale:'fa'})});
+          if(!signup.ok)throw new Error(`signup ${signup.status}: ${await signup.text()}`);
+          const payload=await signup.json();
+          if(!payload.access_token)throw new Error('signup response did not contain access_token');
+
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:2,isMobile:true,hasTouch:true,locale:'fa-IR'});
+          await context.addInitScript(token=>{localStorage.setItem('smarbiz_token',token);localStorage.setItem('smarbiz_locale','fa')},payload.access_token);
+          const page=await context.newPage();
+          const errors=[];
+          page.on('pageerror',error=>errors.push(`pageerror: ${error.message}`));
+          page.on('console',message=>{if(message.type()==='error'&&!message.text().includes('favicon'))errors.push(`console: ${message.text()}`)});
+          const modules=['dashboard','calendar','content-studio','approvals','campaigns','analytics','reports','brand-pulse','assets','integrations','settings','help'];
+          const rows=[];
+          for(const module of modules){
+            const response=await page.goto(`${base}/fa/app/${module}`,{waitUntil:'domcontentloaded',timeout:30000});
+            await page.locator('.mobile-app-header').waitFor({state:'visible',timeout:15000});
+            await page.locator('.mobile-bottom-nav').waitFor({state:'visible',timeout:15000});
+            const result=await page.evaluate(()=>({
+              viewport:window.innerWidth,
+              scrollWidth:Math.max(document.documentElement.scrollWidth,document.body.scrollWidth),
+              mobileHeader:getComputedStyle(document.querySelector('.mobile-app-header')).display,
+              bottomNav:getComputedStyle(document.querySelector('.mobile-bottom-nav')).display,
+              desktopSidebar:getComputedStyle(document.querySelector('.desktop-app-sidebar')).display,
+            }));
+            if((response?.status()||0)>=500)throw new Error(`${module}: HTTP ${response?.status()}`);
+            if(result.scrollWidth>result.viewport+1)throw new Error(`${module}: overflow ${result.scrollWidth}>${result.viewport}`);
+            if(result.desktopSidebar!=='none')throw new Error(`${module}: desktop sidebar visible on mobile`);
+            rows.push(`${module}: HTTP ${response?.status()} width ${result.scrollWidth}/${result.viewport}`);
+          }
+          await page.goto(`${base}/fa/app/dashboard`,{waitUntil:'networkidle'});
+          await page.getByRole('button',{name:'بیشتر'}).click();
+          await page.getByRole('dialog',{name:'بخش‌های بیشتر'}).waitFor({state:'visible'});
+          await page.screenshot({path:'/tmp/smarbiz-mobile.png',fullPage:true});
+          if(errors.length)throw new Error(`runtime errors: ${errors.join(' | ')}`);
+          await browser.close();
+          const api=await fetch(`${base}/api/health`).then(response=>response.text());
+          fs.writeFileSync('/tmp/mobile-report.txt',[`Checked: ${new Date().toISOString()}`,`Account: ${email}`,`API: ${api}`,...rows,'PUBLIC_MOBILE_SUCCESS'].join('\n'));
+          JS
+          node /tmp/verify-mobile.mjs 2>&1 | tee /tmp/mobile-command.log
+      - name: Build report
+        if: always()
+        run: |
+          if [ -f /tmp/mobile-report.txt ]; then cat /tmp/mobile-report.txt; else cat /tmp/mobile-command.log > /tmp/mobile-report.txt; fi
+      - name: Upload public mobile screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smarbiz-public-mobile
+          path: |
+            /tmp/smarbiz-mobile.png
+            /tmp/mobile-report.txt
+          if-no-files-found: ignore
+      - name: Publish public mobile report
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        with:
+          script: |
+            const fs=require('fs');
+            const title='[Ops] Smarbiz public mobile verification';
+            let log='';try{log=fs.readFileSync('/tmp/mobile-report.txt','utf8')}catch(_){}
+            const success=process.env.VERIFY_OUTCOME==='success'&&log.includes('PUBLIC_MOBILE_SUCCESS');
+            const body=[`## ${success?'✅ Public mobile experience verified':'❌ Public mobile verification failed'}`,'',`- Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,`- Outcome: **${process.env.VERIFY_OUTCOME}**`,'','```text',log.replace(/```/g,"'''"),'```'].join('\n');
+            const {data:issues}=await github.rest.issues.listForRepo({owner:context.repo.owner,repo:context.repo.repo,state:'all',per_page:100});
+            const existing=issues.find(issue=>issue.title===title&&!issue.pull_request);
+            if(existing)await github.rest.issues.update({owner:context.repo.owner,repo:context.repo.repo,issue_number:existing.number,state:'open',body});
+            else await github.rest.issues.create({owner:context.repo.owner,repo:context.repo.repo,title,body});
+      - name: Fail when public mobile verification failed
+        if: steps.verify.outcome != 'success'
+        run: exit 1
