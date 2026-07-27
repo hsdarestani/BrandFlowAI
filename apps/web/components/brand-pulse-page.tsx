@@ -7,6 +7,7 @@ import {useToast} from './ui/toast';
 import {statusLabel} from '@/lib/i18n';
 import {brandPulseFieldLabel,brandPulseGroupLabel,brandPulseStatic,localizeBrandPulseAction} from '@/lib/brand-pulse-localization';
 import {localizeRequirementList,normalizeWorkspaceHref,workspaceOptionLabel} from '@/lib/workspace-localization';
+import {localizeWorkspacePayload} from '@/lib/known-copy-localization';
 import styles from './product-pages.module.css';
 
 type Kind='product'|'persona'|'rule'|'memory';
@@ -33,7 +34,7 @@ export function BrandPulseWorkspace({locale}:{locale:string}){
  const c=copy[locale]||copy.en;const toast=useToast();const inputRef=useRef<HTMLInputElement>(null);
  const [data,setData]=useState<Overview|null>(null);const [form,setForm]=useState<Record<string,any>>({});const [editor,setEditor]=useState<Editor|null>(null);const [loading,setLoading]=useState(true);const [error,setError]=useState('');const [busy,setBusy]=useState('');const [query,setQuery]=useState('');
  const fail=(e:any,fallback:string)=>locale==='en'?(e?.message||fallback):fallback;
- async function load(){setLoading(true);setError('');try{const result=await api.get<Overview>('/brand-pulse/overview');setData(result);setForm(result.pulse||{brand_name:result.brand?.name||'',website_url:result.brand?.website_url||'',industry:result.brand?.industry||'',country:result.brand?.country||'',primary_language:result.brand?.primary_language||locale,timezone:result.brand?.timezone||'UTC'})}catch(e:any){setError(fail(e,c.loadingError))}finally{setLoading(false)}}
+ async function load(){setLoading(true);setError('');try{const result=localizeWorkspacePayload(locale,await api.get<Overview>('/brand-pulse/overview'));setData(result);setForm(result.pulse||{brand_name:result.brand?.name||'',website_url:result.brand?.website_url||'',industry:result.brand?.industry||'',country:result.brand?.country||'',primary_language:result.brand?.primary_language||locale,timezone:result.brand?.timezone||'UTC'})}catch(e:any){setError(fail(e,c.loadingError))}finally{setLoading(false)}}
  useEffect(()=>{load()},[]);
  function setField(key:string,value:any){setForm(current=>({...current,[key]:value}))}
  async function savePulse(){setBusy('pulse');try{await api.patch('/brand-pulse',form);toast(c.saved);await load()}catch(e:any){toast(fail(e,c.saveError))}finally{setBusy('')}}
