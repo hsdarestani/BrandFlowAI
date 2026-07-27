@@ -1,0 +1,126 @@
+name: Verify Smarbiz Public Localization
+
+on:
+  push:
+    branches: [ops/recover-production-20260726]
+    paths: [.github/workflows/verify-public-localization.yml,.github/public-localization-trigger.txt]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  verify-localization:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Playwright
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm install @playwright/test@1.52.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Verify public Persian product UI
+        id: verify
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cat > verify-public-localization.mjs <<'JS'
+          import {chromium} from 'playwright';
+          import fs from 'node:fs';
+
+          const base='https://smarbiz.sbs';
+          const email=`public-locale-${Date.now()}@example.com`;
+          const signup=await fetch(`${base}/api/auth/signup`,{
+            method:'POST',headers:{'content-type':'application/json'},
+            body:JSON.stringify({name:'کاربر بررسی عمومی',organization_name:'سازمان بررسی عمومی',email,password:'StrongPass123!',preferred_language:'fa',locale:'fa'})
+          });
+          if(!signup.ok)throw new Error(`signup ${signup.status}: ${await signup.text()}`);
+          const token=(await signup.json()).access_token;
+          if(!token)throw new Error('signup response did not contain access_token');
+
+          const browser=await chromium.launch({headless:true});
+          const context=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:2,isMobile:true,hasTouch:true,locale:'fa-IR'});
+          await context.addInitScript(value=>{localStorage.setItem('smarbiz_token',value);localStorage.setItem('smarbiz_locale','fa')},token);
+          const page=await context.newPage();
+          const pageErrors=[];
+          page.on('pageerror',error=>pageErrors.push(error.message));
+
+          const report=[];
+          const forbidden={
+            'content-studio':['No product/service','Brand Pulse incomplete','No approval method','No channels selected','approval link','Compliance','Rewrite','Shorten','More formal','More direct','Translate…','Not saved','characters'],
+            'brand-pulse':['A living knowledge base','Complete Brand Pulse','Add product/service','Brand Pulse builder','Brand basics','Analyze website','Generate Brand Pulse','Add brand rule','Add compliance, claims, or voice rules.','Add rule','Cancel','Memory text','Preferred channels'],
+            'calendar':['short video','Clear filters','Missing dates','not connected'],
+            'campaigns':['Search campaigns','All statuses','No matching campaigns','No goal','Open Studio','Open Calendar'],
+            'reports':['Search reports','No performance data yet','No approval decisions yet'],
+            'settings':['Loading settings…','No connected channels','Connect a publishing or approval channel.','Missing approval channel','Connect at least one approval method.']
+          };
+
+          for(const [module,words] of Object.entries(forbidden)){
+            const response=await page.goto(`${base}/fa/app/${module}`,{waitUntil:'domcontentloaded',timeout:30000});
+            if((response?.status()||0)>=500)throw new Error(`${module}: HTTP ${response?.status()}`);
+            const main=page.locator('main.app-content');
+            await main.waitFor({state:'visible',timeout:15000});
+            const text=await main.innerText();
+            const stale=words.filter(word=>text.includes(word));
+            if(stale.length)throw new Error(`${module}: stale English copy: ${stale.join(', ')}`);
+            const dimensions=await page.evaluate(()=>({viewport:innerWidth,scrollWidth:Math.max(document.documentElement.scrollWidth,document.body.scrollWidth)}));
+            if(dimensions.scrollWidth>dimensions.viewport+1)throw new Error(`${module}: horizontal overflow ${dimensions.scrollWidth}/${dimensions.viewport}`);
+            report.push(`${module}: HTTP ${response?.status()} · Persian copy clean · width ${dimensions.scrollWidth}/${dimensions.viewport}`);
+            if(module==='content-studio'||module==='brand-pulse')await page.screenshot({path:`/tmp/${module}.png`,fullPage:true});
+          }
+
+          await page.goto(`${base}/fa/app/brand-dna?section=offers`,{waitUntil:'domcontentloaded'});
+          if(!page.url().includes('/fa/app/brand-pulse?section=offers'))throw new Error(`legacy route did not redirect: ${page.url()}`);
+          await page.getByRole('heading',{level:1,name:'پالس برند',exact:true}).waitFor({state:'visible'});
+          report.push('brand-dna legacy route: redirected to localized Brand Pulse');
+
+          await page.getByRole('button',{name:'English'}).click();
+          await page.getByRole('heading',{level:1,name:'Brand Pulse',exact:true}).waitFor({state:'visible'});
+          await page.getByRole('button',{name:'فارسی'}).click();
+          await page.getByRole('heading',{level:1,name:'پالس برند',exact:true}).waitFor({state:'visible'});
+          report.push('language switch: fa → en → fa passed');
+
+          if(pageErrors.length)throw new Error(`page errors: ${pageErrors.join(' | ')}`);
+          const api=await fetch(`${base}/api/health`).then(response=>response.text());
+          await browser.close();
+          fs.writeFileSync('/tmp/public-localization-report.txt',[`Checked: ${new Date().toISOString()}`,`Account: ${email}`,`API: ${api}`,...report,'PUBLIC_LOCALIZATION_SUCCESS'].join('\n'));
+          JS
+          node verify-public-localization.mjs 2>&1 | tee /tmp/public-localization-command.log
+      - name: Build report
+        if: always()
+        run: |
+          if [ -f /tmp/public-localization-report.txt ]; then cat /tmp/public-localization-report.txt; else cp /tmp/public-localization-command.log /tmp/public-localization-report.txt; fi
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smarbiz-public-localization
+          path: |
+            /tmp/public-localization-report.txt
+            /tmp/content-studio.png
+            /tmp/brand-pulse.png
+          if-no-files-found: ignore
+      - name: Publish report
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        with:
+          script: |
+            const fs=require('fs');
+            const title='[Ops] Smarbiz public localization verification';
+            let log='';try{log=fs.readFileSync('/tmp/public-localization-report.txt','utf8')}catch(_){}
+            const success=process.env.VERIFY_OUTCOME==='success'&&log.includes('PUBLIC_LOCALIZATION_SUCCESS');
+            const body=[`## ${success?'✅ Public Persian UI verified':'❌ Public localization verification failed'}`,'',`- Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,`- Outcome: **${process.env.VERIFY_OUTCOME}**`,'','```text',log.replace(/```/g,"'''"),'```'].join('\n');
+            const {data:issues}=await github.rest.issues.listForRepo({owner:context.repo.owner,repo:context.repo.repo,state:'all',per_page:100});
+            const existing=issues.find(issue=>issue.title===title&&!issue.pull_request);
+            if(existing)await github.rest.issues.update({owner:context.repo.owner,repo:context.repo.repo,issue_number:existing.number,state:'open',body});
+            else await github.rest.issues.create({owner:context.repo.owner,repo:context.repo.repo,title,body});
+      - name: Fail if verification failed
+        if: steps.verify.outcome != 'success'
+        run: exit 1
