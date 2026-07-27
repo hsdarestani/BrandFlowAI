@@ -66,7 +66,7 @@ const aliases:Record<string,string>={
 const labels:Record<Locale,Record<string,Record<string,string>>>= {
  fa:{
   language:{fa:'فارسی',en:'انگلیسی',de:'آلمانی'},
-  channel:{instagram:'اینستاگرام',telegram:'تلگرام',bale:'بله',linkedin:'لینکدین',google_business:'پروفایل کسب‌وکار گوگل',email:'ایمیل',blog:'وبلاگ',facebook:'فیسبوک',youtube:'یوتیوب',tiktok:'تیک‌تاک',other:'سایر'},
+  channel:{approval_link:'لینک تأیید',instagram:'اینستاگرام',telegram:'تلگرام',bale:'بله',linkedin:'لینکدین',google_business:'پروفایل کسب‌وکار گوگل',email:'ایمیل',blog:'وبلاگ',facebook:'فیسبوک',youtube:'یوتیوب',tiktok:'تیک‌تاک',other:'سایر'},
   contentType:{post:'پست',reel:'ریلز',story:'استوری',carousel:'کاروسل',short_video:'ویدئوی کوتاه',email:'ایمیل',blog:'مقاله وبلاگ',google_update:'به‌روزرسانی گوگل',telegram_post:'پست تلگرام',bale_post:'پست بله'},
   tone:{clear:'شفاف',professional:'حرفه‌ای',friendly:'صمیمی',formal:'رسمی',direct:'مستقیم',playful:'سرزنده'},
   transform:{rewrite:'بازنویسی',shorten:'کوتاه‌تر',more_formal:'رسمی‌تر',more_direct:'مستقیم‌تر'},
@@ -74,7 +74,7 @@ const labels:Record<Locale,Record<string,Record<string,string>>>= {
  en:{language:{fa:'Persian',en:'English',de:'German'},channel:{},contentType:{},tone:{},transform:{rewrite:'Rewrite',shorten:'Shorten',more_formal:'More formal',more_direct:'More direct'}},
  de:{
   language:{fa:'Persisch',en:'Englisch',de:'Deutsch'},
-  channel:{instagram:'Instagram',telegram:'Telegram',bale:'Bale',linkedin:'LinkedIn',google_business:'Google Unternehmensprofil',email:'E-Mail',blog:'Blog',facebook:'Facebook',youtube:'YouTube',tiktok:'TikTok',other:'Andere'},
+  channel:{approval_link:'Freigabelink',instagram:'Instagram',telegram:'Telegram',bale:'Bale',linkedin:'LinkedIn',google_business:'Google Unternehmensprofil',email:'E-Mail',blog:'Blog',facebook:'Facebook',youtube:'YouTube',tiktok:'TikTok',other:'Andere'},
   contentType:{post:'Beitrag',reel:'Reel',story:'Story',carousel:'Karussell',short_video:'Kurzvideo',email:'E-Mail',blog:'Blogartikel',google_update:'Google-Update',telegram_post:'Telegram-Beitrag',bale_post:'Bale-Beitrag'},
   tone:{clear:'Klar',professional:'Professionell',friendly:'Freundlich',formal:'Formell',direct:'Direkt',playful:'Locker'},
   transform:{rewrite:'Neu formulieren',shorten:'Kürzen',more_formal:'Formeller',more_direct:'Direkter'},
