@@ -1,0 +1,43 @@
+name: Apply mobile shell scope
+
+on:
+  push:
+    branches: [agent/full-app-test-suite]
+    paths: [.github/workflows/apply-mobile-shell-scope.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/full-app-test-suite
+      - name: Bind the CSS module to the shell root
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('apps/web/components/app-shell.tsx')
+          text=path.read_text()
+          import_line="import styles from './app-shell.module.css';"
+          if import_line not in text:
+            text=text.replace("import {localizeHomeOverview,productCopy} from '@/lib/product-copy';", "import {localizeHomeOverview,productCopy} from '@/lib/product-copy';\n"+import_line,1)
+          old='return <div className="app-layout" data-locale={locale} dir="ltr">'
+          new='return <div className={`${styles.shellRoot} app-layout`} data-locale={locale} dir="ltr">'
+          if old in text:text=text.replace(old,new,1)
+          elif new not in text:raise SystemExit('shell root marker not found')
+          path.write_text(text)
+
+          language=Path('apps/web/components/language-switcher.tsx')
+          source=language.read_text().replace("import './app-shell.module.css';\n",'')
+          language.write_text(source)
+          PY
+      - name: Commit binding
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web/components/app-shell.tsx apps/web/components/language-switcher.tsx
+          git commit -m 'Bind responsive styles to the app shell root'
+          git push origin HEAD:agent/full-app-test-suite
