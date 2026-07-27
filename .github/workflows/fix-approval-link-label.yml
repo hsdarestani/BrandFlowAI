@@ -1,0 +1,34 @@
+name: Fix approval link label
+
+on:
+  push:
+    branches: [agent/fix-localization-mobile-ui]
+    paths: [.github/workflows/fix-approval-link-label.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-localization-mobile-ui
+      - name: Localize approval link channel
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('apps/web/lib/workspace-localization.ts')
+          text=path.read_text()
+          text=text.replace("channel:{instagram:'اینستاگرام'", "channel:{approval_link:'لینک تأیید',instagram:'اینستاگرام'",1)
+          text=text.replace("channel:{instagram:'Instagram'", "channel:{approval_link:'Freigabelink',instagram:'Instagram'",1)
+          path.write_text(text)
+          PY
+      - name: Commit label fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web/lib/workspace-localization.ts
+          git commit -m 'Localize approval link channel label'
+          git push origin HEAD:agent/fix-localization-mobile-ui
