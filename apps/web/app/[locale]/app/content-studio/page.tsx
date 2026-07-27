@@ -8,6 +8,7 @@ import {useToast} from '@/components/ui/toast';
 import {api} from '@/lib/api';
 import {statusLabel} from '@/lib/i18n';
 import {localizeRequirementList,normalizeWorkspaceHref,workspaceOptionLabel} from '@/lib/workspace-localization';
+import {localizeStudioRule} from '@/lib/known-copy-localization';
 import styles from '@/components/product-pages.module.css';
 
 type Severity='info'|'warning'|'danger';
@@ -50,7 +51,7 @@ function Studio({locale}:{locale:string}){
 
  async function load(first=false,preferredId?:number|string){
   if(first)setInitialLoading(true);setError('');
-  try{const data=await api.get<StudioOverview>('/studio/overview');setOverview(data);const requested=preferredId||searchParams.get('draft');const forceNew=searchParams.get('new')==='1';if(forceNew){setDraft(blankDraft(data.brand?.primary_language||locale));setDirty(false)}else if(requested){const found=data.drafts.find(x=>String(x.id)===String(requested));setDraft(found||await api.get<StudioDraft>(`/studio/drafts/${requested}`));setDirty(false)}else if(!draft.id&&data.drafts[0]){setDraft(data.drafts[0]);setDirty(false)}}catch(e:any){setError(fail(e,c.retry))}finally{if(first)setInitialLoading(false)}
+  try{const raw=await api.get<StudioOverview>('/studio/overview');const data={...raw,brand_rules:(raw.brand_rules||[]).map(rule=>localizeStudioRule(locale,rule))};setOverview(data);const requested=preferredId||searchParams.get('draft');const forceNew=searchParams.get('new')==='1';if(forceNew){setDraft(blankDraft(data.brand?.primary_language||locale));setDirty(false)}else if(requested){const found=data.drafts.find(x=>String(x.id)===String(requested));setDraft(found||await api.get<StudioDraft>(`/studio/drafts/${requested}`));setDirty(false)}else if(!draft.id&&data.drafts[0]){setDraft(data.drafts[0]);setDirty(false)}}catch(e:any){setError(fail(e,c.retry))}finally{if(first)setInitialLoading(false)}
  }
  function update(key:keyof StudioDraft,value:any){if(readOnly)return toast(c.readOnly);setDraft(current=>({...current,[key]:value}));setDirty(true)}
  function payload(){return {title:draft.title,body:draft.body,hook:draft.hook,cta:draft.cta,hashtags:draft.hashtags,goal:draft.goal,channel:draft.channel,language:draft.language,content_type:draft.content_type,product_or_offer:draft.product_or_offer,tone:draft.tone,prompt:draft.prompt,status:draft.status}}

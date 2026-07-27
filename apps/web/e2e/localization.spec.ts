@@ -59,7 +59,7 @@ test('authenticated language switching replaces page copy without leaving stale 
  await expect(page).toHaveURL(/\/en\/app\/brand-pulse/);
  await expect(page.getByRole('heading',{name:'Brand Pulse',exact:true})).toBeVisible();
  await expect(page.locator('main.app-content')).not.toContainText('سازنده دانش برند');
- await page.getByRole('button',{name:'Persian'}).click();
+ await page.getByRole('button',{name:'فارسی'}).click();
  await expect(page).toHaveURL(/\/fa\/app\/brand-pulse/);
  await expect(page.getByRole('heading',{name:'پالس برند',exact:true})).toBeVisible();
  await expect(page.locator('main.app-content')).not.toContainText('Brand knowledge builder');
