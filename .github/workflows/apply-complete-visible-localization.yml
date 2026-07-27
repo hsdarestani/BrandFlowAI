@@ -113,3 +113,4 @@ jobs:
           git add apps/web
           git commit -m 'Localize every audited Persian product surface'
           git push origin HEAD:agent/fix-localization-mobile-ui
+# Trigger after workflow registration.
