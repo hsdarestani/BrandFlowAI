@@ -41,3 +41,4 @@ jobs:
           git add apps/web/components/app-shell.tsx apps/web/components/language-switcher.tsx
           git commit -m 'Bind responsive styles to the app shell root'
           git push origin HEAD:agent/full-app-test-suite
+# Trigger after workflow registration.
