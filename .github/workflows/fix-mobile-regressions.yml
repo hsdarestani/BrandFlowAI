@@ -43,3 +43,4 @@ jobs:
           git add apps/web/components/app-shell.tsx apps/web/app/globals.css
           git commit -m 'Fix mobile language targets and help icon'
           git push origin HEAD:agent/full-app-test-suite
+# Trigger after workflow registration.
