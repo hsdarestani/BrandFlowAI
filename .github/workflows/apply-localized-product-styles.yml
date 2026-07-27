@@ -1,0 +1,51 @@
+name: Apply localized product styles
+
+on:
+  push:
+    branches: [agent/fix-localization-mobile-ui]
+    paths: [.github/workflows/apply-localized-product-styles.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-localization-mobile-ui
+      - name: Bind styles and fix remaining labels
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          studio=Path('apps/web/app/[locale]/app/content-studio/page.tsx')
+          text=studio.read_text()
+          marker="import {localizeRequirementList,normalizeWorkspaceHref,workspaceOptionLabel} from '@/lib/workspace-localization';"
+          if "product-pages.module.css" not in text:
+            text=text.replace(marker,marker+"\nimport styles from '@/components/product-pages.module.css';",1)
+          text=text.replace('return <div className="studio-page space-y-4 md:space-y-5">','return <div className={`${styles.root} studio-page space-y-4 md:space-y-5`}>',1)
+          text=text.replace("toast(`${c.generated} · ${result.provider}`)","toast(locale==='en'?`${c.generated} · ${result.provider}`:c.generated)",1)
+          studio.write_text(text)
+
+          pulse=Path('apps/web/components/brand-pulse-page.tsx')
+          text=pulse.read_text()
+          marker="import {localizeRequirementList,normalizeWorkspaceHref,workspaceOptionLabel} from '@/lib/workspace-localization';"
+          if "product-pages.module.css" not in text:
+            text=text.replace(marker,marker+"\nimport styles from './product-pages.module.css';",1)
+          text=text.replace('return <div className="brand-pulse-page space-y-4 md:space-y-5">','return <div className={`${styles.root} brand-pulse-page space-y-4 md:space-y-5`}>',1)
+          text=text.replace("finally{setBusy('starter')}","finally{setBusy('')}",1)
+          text=text.replace("retry:'Retry',knowledgeSub", "retry:'Retry',archive:'Archive',knowledgeSub",1)
+          text=text.replace("retry:'تلاش دوباره',knowledgeSub", "retry:'تلاش دوباره',archive:'آرشیو',knowledgeSub",1)
+          text=text.replace("retry:'Erneut versuchen',knowledgeSub", "retry:'Erneut versuchen',archive:'Archivieren',knowledgeSub",1)
+          text=text.replace("{kind==='product'?c.archiveConfirm.replace(/[؟?]/g,''):c.delete}","{kind==='product'?c.archive:c.delete}",1)
+          pulse.write_text(text)
+          PY
+      - name: Commit bindings
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web/app/[locale]/app/content-studio/page.tsx apps/web/components/brand-pulse-page.tsx
+          git commit -m 'Bind polished product page styles and finish labels'
+          git push origin HEAD:agent/fix-localization-mobile-ui
