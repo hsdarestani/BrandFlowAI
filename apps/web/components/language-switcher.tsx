@@ -3,6 +3,7 @@
 import {usePathname,useRouter,useSearchParams} from 'next/navigation';
 import {startTransition} from 'react';
 import {locales,switchLocalePath,type Locale} from '@/lib/i18n';
+import './app-shell.module.css';
 
 const labels:Record<Locale,string>={fa:'فا',en:'EN',de:'DE'};
 const names:Record<Locale,string>={fa:'فارسی',en:'English',de:'Deutsch'};
