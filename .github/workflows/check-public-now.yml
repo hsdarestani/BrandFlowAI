@@ -1,0 +1,60 @@
+name: Check Smarbiz Public Now
+
+on:
+  push:
+    branches: [ops/recover-production-20260726]
+    paths: [.github/public-check-trigger.txt]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check public routes
+        id: check
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            date -Is
+            echo '=== DNS ==='
+            getent ahosts smarbiz.sbs || true
+            echo '=== ROOT ==='
+            curl -4 -fsSIL --max-time 20 https://smarbiz.sbs/ | sed -n '1,20p'
+            echo '=== FA ==='
+            curl -4 -fsS -D /tmp/fa.headers --max-time 30 https://smarbiz.sbs/fa -o /tmp/fa.html
+            sed -n '1,25p' /tmp/fa.headers
+            echo "BODY_BYTES=$(wc -c </tmp/fa.html)"
+            grep -qi 'Smarbiz' /tmp/fa.html
+            echo '=== LOGIN ==='
+            curl -4 -fsS -o /tmp/login.html -w 'HTTP=%{http_code} TIME=%{time_total} IP=%{remote_ip}\n' --max-time 30 https://smarbiz.sbs/fa/auth/login
+            test "$(wc -c </tmp/login.html)" -gt 1000
+            echo '=== API ==='
+            curl -4 -fsS --max-time 20 https://smarbiz.sbs/api/health
+            echo
+            echo PUBLIC_SUCCESS
+          } 2>&1 | tee /tmp/public.log
+      - name: Publish result
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          OUTCOME: ${{ steps.check.outcome }}
+        with:
+          script: |
+            const fs=require('fs');
+            const title='[Ops] Smarbiz public check now';
+            let log='';try{log=fs.readFileSync('/tmp/public.log','utf8')}catch(_){ }
+            const success=process.env.OUTCOME==='success'&&log.includes('PUBLIC_SUCCESS');
+            const body=`## ${success?'✅ Public site is reachable':'❌ Public site is not reachable'}\n\n- Checked: ${new Date().toISOString()}\n- Outcome: **${process.env.OUTCOME}**\n\n\`\`\`text\n${log}\n\`\`\``;
+            const {data:issues}=await github.rest.issues.listForRepo({owner:context.repo.owner,repo:context.repo.repo,state:'all',per_page:100});
+            const existing=issues.find(x=>x.title===title&&!x.pull_request);
+            if(existing)await github.rest.issues.update({owner:context.repo.owner,repo:context.repo.repo,issue_number:existing.number,state:'open',body});
+            else await github.rest.issues.create({owner:context.repo.owner,repo:context.repo.repo,title,body});
+      - name: Fail when unavailable
+        if: steps.check.outcome != 'success'
+        run: exit 1
