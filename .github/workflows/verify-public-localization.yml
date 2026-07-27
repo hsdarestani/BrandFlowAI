@@ -79,11 +79,15 @@ jobs:
           await page.getByRole('heading',{level:1,name:'پالس برند',exact:true}).waitFor({state:'visible'});
           report.push('brand-dna legacy route: redirected to localized Brand Pulse');
 
-          await page.getByRole('button',{name:'English'}).click();
+          await page.getByRole('button',{name:'بیشتر',exact:true}).click();
+          const faSheet=page.getByRole('dialog',{name:'بخش‌های بیشتر'});
+          await faSheet.getByRole('button',{name:'English'}).click();
           await page.getByRole('heading',{level:1,name:'Brand Pulse',exact:true}).waitFor({state:'visible'});
-          await page.getByRole('button',{name:'فارسی'}).click();
+          await page.getByRole('button',{name:'More',exact:true}).click();
+          const enSheet=page.getByRole('dialog',{name:'More tools'});
+          await enSheet.getByRole('button',{name:'فارسی'}).click();
           await page.getByRole('heading',{level:1,name:'پالس برند',exact:true}).waitFor({state:'visible'});
-          report.push('language switch: fa → en → fa passed');
+          report.push('language switch through mobile More sheet: fa → en → fa passed');
 
           if(pageErrors.length)throw new Error(`page errors: ${pageErrors.join(' | ')}`);
           const api=await fetch(`${base}/api/health`).then(response=>response.text());
