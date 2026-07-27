@@ -1,0 +1,53 @@
+name: Finalize localization audit
+
+on:
+  push:
+    branches: [agent/fix-localization-mobile-ui]
+    paths: [.github/workflows/finalize-localization-audit.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-localization-mobile-ui
+      - name: Apply final localization fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          workspace=Path('apps/web/lib/workspace-localization.ts')
+          text=workspace.read_text()
+          text=text.replace("contentType:{post:'پست',reel:'ریلز',story:'استوری',carousel:'کاروسل',email:'ایمیل'", "contentType:{post:'پست',reel:'ریلز',story:'استوری',carousel:'کاروسل',short_video:'ویدئوی کوتاه',email:'ایمیل'",1)
+          text=text.replace("contentType:{post:'Beitrag',reel:'Reel',story:'Story',carousel:'Karussell',email:'E-Mail'", "contentType:{post:'Beitrag',reel:'Reel',story:'Story',carousel:'Karussell',short_video:'Kurzvideo',email:'E-Mail'",1)
+          workspace.write_text(text)
+
+          pulse=Path('apps/web/components/brand-pulse-page.tsx')
+          text=pulse.read_text()
+          marker="import {localizeRequirementList,normalizeWorkspaceHref,workspaceOptionLabel} from '@/lib/workspace-localization';"
+          if "localizeWorkspacePayload" not in text:
+            text=text.replace(marker,marker+"\nimport {localizeWorkspacePayload} from '@/lib/known-copy-localization';",1)
+          old="const result=await api.get<Overview>('/brand-pulse/overview');setData(result);"
+          new="const result=localizeWorkspacePayload(locale,await api.get<Overview>('/brand-pulse/overview'));setData(result);"
+          if old not in text and new not in text:raise SystemExit('Brand Pulse load marker missing')
+          text=text.replace(old,new,1)
+          pulse.write_text(text)
+
+          spec=Path('apps/web/e2e/localization.spec.ts')
+          text=spec.read_text()
+          text=text.replace("getByRole('heading',{name:'استودیوی محتوا',exact:true})","getByRole('heading',{level:1,name:'استودیوی محتوا',exact:true})")
+          text=text.replace("getByRole('heading',{name:'پالس برند',exact:true})","getByRole('heading',{level:1,name:'پالس برند',exact:true})")
+          text=text.replace("getByRole('heading',{name:'Brand Pulse',exact:true})","getByRole('heading',{level:1,name:'Brand Pulse',exact:true})")
+          spec.write_text(text)
+          PY
+      - name: Commit final fixes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web
+          git commit -m 'Finish final visible localization audit fixes'
+          git push origin HEAD:agent/fix-localization-mobile-ui
