@@ -10,6 +10,7 @@ const phrases:Record<Locale,Record<string,string>>={
   'Complete setup':'تکمیل راه‌اندازی','Resolve missing setup steps.':'مراحل ناقص راه‌اندازی را کامل کنید.',
   'Brand Pulse not completed':'پالس برند تکمیل نشده است','No product/service added':'محصول یا خدمتی اضافه نشده است','No product/service':'محصول یا خدمتی اضافه نشده است',
   'No channels selected':'کانالی انتخاب نشده است','No approval method connected':'روش تأییدی متصل نیست','Enable public approval link or connect Telegram/Bale.':'لینک عمومی تأیید را فعال کنید یا تلگرام/بله را متصل کنید.',
+  'No connected channels':'هیچ کانالی متصل نیست','Connect a publishing or approval channel.':'یک کانال انتشار یا روش تأیید متصل کنید.','Missing approval channel':'مسیر تأیید ناقص است','Connect at least one approval method.':'حداقل یک روش تأیید متصل کنید.',
   'No performance data yet':'هنوز داده عملکردی ثبت نشده است','No approval decisions yet':'هنوز تصمیم تأییدی ثبت نشده است',
   'Report missing performance data':'داده عملکرد گزارش ناقص است','Add manual metrics or connect analytics for stronger reports.':'برای گزارش دقیق‌تر، متریک واقعی را دستی وارد کنید یا ابزار تحلیل را متصل کنید.',
   'Next step':'قدم بعدی','Create your first weekly content plan.':'اولین برنامه هفتگی محتوا را ایجاد کنید.','No content generated':'هنوز محتوایی ساخته نشده است','Generate your first week to start tracking activity.':'برای شروع ثبت فعالیت، اولین هفته محتوا را بسازید.',
@@ -25,6 +26,7 @@ const phrases:Record<Locale,Record<string,string>>={
   'Plan your first content week':'Planen Sie Ihre erste Content-Woche','Generate or create your first content items.':'Generieren oder erstellen Sie Ihre ersten Inhalte.',
   'Complete setup':'Setup abschließen','Resolve missing setup steps.':'Schließen Sie die fehlenden Setup-Schritte ab.',
   'Brand Pulse not completed':'Brand Pulse ist nicht vollständig','No product/service added':'Kein Produkt oder Service hinzugefügt','No channels selected':'Keine Kanäle ausgewählt','No approval method connected':'Keine Freigabemethode verbunden',
+  'No connected channels':'Keine Kanäle verbunden','Connect a publishing or approval channel.':'Verbinden Sie einen Publishing- oder Freigabekanal.','Missing approval channel':'Freigabekanal fehlt','Connect at least one approval method.':'Verbinden Sie mindestens eine Freigabemethode.',
   'No performance data yet':'Noch keine Performance-Daten','No approval decisions yet':'Noch keine Freigabeentscheidungen','Report missing performance data':'Performance-Daten im Bericht fehlen','Add manual metrics or connect analytics for stronger reports.':'Fügen Sie echte Metriken hinzu oder verbinden Sie Analytics.',
   'Next step':'Nächster Schritt','Create your first weekly content plan.':'Erstellen Sie Ihren ersten wöchentlichen Content-Plan.','No content generated':'Noch keine Inhalte generiert','Generate your first week to start tracking activity.':'Generieren Sie die erste Woche, um Aktivitäten zu verfolgen.',
   'Add brand rule':'Markenregel hinzufügen','Add compliance, claims, or voice rules.':'Regeln für Tonalität, Aussagen und Compliance hinzufügen.','Add rule':'Regel hinzufügen',
@@ -34,10 +36,19 @@ const phrases:Record<Locale,Record<string,string>>={
  en:{}
 };
 
+function dictionaryLookup(locale:string,value:string){
+ const dictionary=phrases[lang(locale)];
+ const trimmed=value.trim();
+ const exact=dictionary[trimmed];
+ if(exact)return exact;
+ const lower=trimmed.toLowerCase();
+ const match=Object.entries(dictionary).find(([key])=>key.toLowerCase()===lower);
+ return match?.[1]||value;
+}
+
 export function localizeKnownText(locale:string,value:any){
  if(typeof value!=='string'||locale==='en')return value;
- const dictionary=phrases[lang(locale)];
- return dictionary[value]||value;
+ return dictionaryLookup(locale,value);
 }
 
 export function deepLocalizeKnownCopy<T>(locale:string,value:T):T{
@@ -66,6 +77,17 @@ export function localizeWorkspacePayload<T extends any>(locale:string,value:T):T
 
 export function localizeStudioRule(locale:string,rule:any){
  if(!rule||locale==='en')return rule;
+ const raw=`${rule.label||''} ${rule.description||''}`.toLowerCase();
+ if(locale==='fa'){
+  if(raw.includes('approval link'))return {...rule,label:'لینک تأیید',description:'از لینک عمومی تأیید برای بررسی امن محتوا استفاده کنید.'};
+  if(raw.includes('approval note'))return {...rule,label:'نکات تأیید',description:localizeKnownText(locale,rule.description)};
+  if(raw.includes('channel rule'))return {...rule,label:'قوانین کانال‌ها',description:localizeKnownText(locale,rule.description)};
+ }
+ if(locale==='de'){
+  if(raw.includes('approval link'))return {...rule,label:'Freigabelink',description:'Nutzen Sie den öffentlichen Freigabelink für eine sichere Inhaltsprüfung.'};
+  if(raw.includes('approval note'))return {...rule,label:'Freigabehinweise',description:localizeKnownText(locale,rule.description)};
+  if(raw.includes('channel rule'))return {...rule,label:'Kanalregeln',description:localizeKnownText(locale,rule.description)};
+ }
  return {...rule,label:localizeKnownText(locale,rule.label),description:localizeKnownText(locale,rule.description)};
 }
 
