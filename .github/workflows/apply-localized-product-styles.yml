@@ -49,3 +49,4 @@ jobs:
           git add apps/web/app/[locale]/app/content-studio/page.tsx apps/web/components/brand-pulse-page.tsx
           git commit -m 'Bind polished product page styles and finish labels'
           git push origin HEAD:agent/fix-localization-mobile-ui
+# Trigger after workflow registration.
