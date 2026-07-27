@@ -51,3 +51,4 @@ jobs:
           git add apps/web
           git commit -m 'Finish final visible localization audit fixes'
           git push origin HEAD:agent/fix-localization-mobile-ui
+# Trigger after workflow registration.
