@@ -78,3 +78,4 @@ test('Persian content tools localize dynamic setup data and legacy routes',async
           git add apps/web/e2e/app.spec.ts apps/web/scripts/check-visible-strings.mjs
           git commit -m 'Cover dynamic Persian localization and legacy Brand Pulse routes'
           git push origin HEAD:agent/fix-localization-mobile-ui
+# Trigger after workflow registration.
