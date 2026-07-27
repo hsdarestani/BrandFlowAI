@@ -36,3 +36,4 @@ jobs:
           git add apps/web/components/brand-pulse-page.tsx
           git commit -m 'Remove nested main from Brand Pulse workspace'
           git push origin HEAD:agent/fix-localization-mobile-ui
+# Trigger after workflow registration.
