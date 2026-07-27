@@ -50,3 +50,4 @@ jobs:
           git add apps/api apps/web
           git commit -m 'Normalize Brand Pulse routes across the workspace'
           git push origin HEAD:agent/fix-localization-mobile-ui
+# Trigger after workflow registration.
