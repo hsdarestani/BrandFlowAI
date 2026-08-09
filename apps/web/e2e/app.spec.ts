@@ -71,7 +71,7 @@ test('root locale, Persian direction, font, and auth copy are correct',async({pa
  await expect(page.getByRole('heading',{name:'Welcome back'})).toBeVisible();
 });
 
-test('a new Persian user can register, complete onboarding, and reach guided activation',async({page})=>{
+test('a new Persian user can register, complete the ten-question chat, and reach guided activation',async({page})=>{
  const runtimeErrors=captureRuntimeErrors(page);
  const email=`${unique('browser')}@example.com`;
  await page.goto('/fa/auth/signup');
@@ -83,31 +83,36 @@ test('a new Persian user can register, complete onboarding, and reach guided act
  await page.getByRole('checkbox').check();
  await page.getByRole('button',{name:'ساخت فضای کاری'}).click();
  await expect(page).toHaveURL(/\/fa\/onboarding/);
- await expect(page.getByRole('heading',{name:'نحوه کار کسب‌وکارت را به اسماربیز یاد بده'})).toBeVisible();
+ await expect(page.getByRole('heading',{name:'اسماربیز را برای کسب‌وکار خودت می‌خواهی یا برای مشتری‌ها؟'})).toBeVisible();
+ await expect(page.getByText('سؤال 1 از 10',{exact:true})).toBeVisible();
 
- await page.getByRole('button',{name:'ادامه'}).click();
+ await page.getByRole('button',{name:'ذخیره و ادامه'}).click();
  await page.getByLabel(/نام برند/).fill('برند مرورگر');
+ await page.getByRole('button',{name:'ذخیره و ادامه'}).click();
  await page.getByLabel(/حوزه فعالیت/).fill('نرم‌افزار');
- await page.getByRole('button',{name:'ادامه'}).click();
- await page.getByLabel(/کسب‌وکار دقیقاً چه کاری/).fill('یک ابزار برای مدیریت عملیات محتوا');
- await page.getByLabel(/محتوا باید چه کسی/).fill('مدیران کسب‌وکارهای کوچک');
- await page.getByLabel(/مسئله‌ها و سؤال‌های مخاطب/).fill('بی‌نظمی در تولید محتوا');
- await page.getByLabel(/مخاطب دنبال چه نتیجه‌ای/).fill('برنامه منظم و قابل اجرا');
+ await page.getByRole('button',{name:'ذخیره و ادامه'}).click();
+ await page.getByLabel(/توضیح کسب‌وکار/).fill('یک ابزار برای مدیریت عملیات محتوا');
+ await page.getByRole('button',{name:'ذخیره و ادامه'}).click();
+ await page.getByLabel(/مخاطب هدف/).fill('مدیران کسب‌وکارهای کوچک');
+ await page.getByLabel(/دردها \/ سؤال‌های اصلی/).fill('بی‌نظمی در تولید محتوا');
+ await page.getByLabel(/نتیجه‌ای که می‌خواهد/).fill('برنامه منظم و قابل اجرا');
+ await page.getByRole('button',{name:'ذخیره و ادامه'}).click();
+ await page.getByLabel(/محصول \/ خدمت اصلی/).fill('مدیریت محتوای ماهانه');
+ await page.getByLabel(/پیشنهاد شامل چیست/).fill('برنامه‌ریزی، تولید و تأیید محتوای ماهانه');
+ await page.getByLabel(/مزیت‌ها و ارزش‌های کلیدی/).fill('سرعت\nکیفیت یکدست');
+ await page.getByRole('button',{name:'ذخیره و ادامه'}).click();
  await page.getByLabel(/لحن برند/).fill('شفاف، آرام و حرفه‌ای');
  await page.getByLabel(/سبک نوشتن/).fill('جمله‌های کوتاه و مشخص');
- await page.getByRole('button',{name:'ادامه'}).click();
- await page.getByLabel(/محصول یا خدمت اصلی/).fill('مدیریت محتوای ماهانه');
- await page.getByLabel(/پیشنهاد را توضیح بده/).fill('برنامه‌ریزی، تولید و تأیید محتوای ماهانه');
+ await page.getByRole('button',{name:'ذخیره و ادامه'}).click();
  await page.getByLabel(/ستون‌های محتوا/).fill('آموزش\nاعتمادسازی');
- await page.getByLabel(/مزایا یا ارزش‌های کلیدی/).fill('سرعت\nکیفیت یکدست');
- await page.getByLabel(/ادعاها یا عبارت‌های ممنوع/).fill('نتیجه تضمینی');
- await page.getByRole('button',{name:'ادامه'}).click();
+ await page.getByRole('button',{name:'ذخیره و ادامه'}).click();
  await expect(page.getByText('اینستاگرام',{exact:true})).toBeVisible();
  await expect(page.getByText('لینک عمومی تأیید',{exact:true})).toBeVisible();
- await page.getByRole('button',{name:'ادامه'}).click();
- await expect(page.getByText('برای ساخت اولین خروجی مفید آماده‌ای')).toBeVisible();
- await page.getByRole('button',{name:'شروع ساخت اولین نتیجه'}).click();
- await expect(page).toHaveURL(/\/fa\/app\/dashboard\?activation=1/);
+ await page.getByRole('button',{name:'ذخیره و ادامه'}).click();
+ await page.getByLabel(/ادعاها \/ عبارت‌های ممنوع/).fill('نتیجه تضمینی');
+ await expect(page.getByText('تمام شد؛ فقط همین ۱۰ سؤال بود.')).toBeVisible();
+ await page.getByRole('button',{name:'ذخیره و ورود به پنل'}).click();
+ await expect(page).toHaveURL(/\/fa\/app\/dashboard\?activation=chat-complete/);
  await expect(page.locator('main')).toContainText(/اولین خروجی|عملیات محتوا/);
  expect(runtimeErrors).toEqual([]);
 });
