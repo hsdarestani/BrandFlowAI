@@ -22,6 +22,8 @@ async function createPersianSession(request:APIRequestContext,seeded:boolean){
   expect(product.ok(),await product.text()).toBeTruthy();
   const connector=await request.post(`${API_URL}/integrations/connections`,{headers,data:{provider:'approval_link',display_name:'لینک عمومی تأیید',config:{}}});
   expect([200,201,409]).toContain(connector.status());
+  const activate=await request.post(`${API_URL}/onboarding/activate`,{headers,data:{}});
+  expect(activate.ok(),await activate.text()).toBeTruthy();
  }
  return token;
 }
@@ -47,17 +49,25 @@ function englishOffenders(text:string){
  return [...uniqueLines].filter(Boolean).slice(0,30);
 }
 
-for(const seeded of [false,true]){
- test(`all Persian modules avoid visible English copy (${seeded?'configured':'new'} workspace)`,async({page,request})=>{
-  const token=await createPersianSession(request,seeded);
-  await installSession(page,token);
-  const report:Record<string,string[]>={};
-  for(const module of modules){
-   await page.goto(`/fa/app/${module}`,{waitUntil:'domcontentloaded'});
-   await expect(page.locator('main.app-content')).toBeVisible();
-   const offenders=englishOffenders(await page.locator('main.app-content').innerText());
-   if(offenders.length)report[module]=offenders;
-  }
-  expect(report,`Visible English copy remains in Persian modules:\n${JSON.stringify(report,null,2)}`).toEqual({});
- });
-}
+test('new Persian workspace is gated by a Persian-only onboarding chat',async({page,request})=>{
+ const token=await createPersianSession(request,false);
+ await installSession(page,token);
+ await page.goto('/fa/app/content-studio',{waitUntil:'domcontentloaded'});
+ await expect(page).toHaveURL(/\/fa\/onboarding/);
+ await expect(page.getByText('سؤال 1 از 10',{exact:true})).toBeVisible();
+ const offenders=englishOffenders(await page.locator('main').innerText());
+ expect(offenders,`Visible English copy remains in Persian onboarding:\n${JSON.stringify(offenders,null,2)}`).toEqual([]);
+});
+
+test('all Persian modules avoid visible English copy in a configured workspace',async({page,request})=>{
+ const token=await createPersianSession(request,true);
+ await installSession(page,token);
+ const report:Record<string,string[]>={};
+ for(const module of modules){
+  await page.goto(`/fa/app/${module}`,{waitUntil:'domcontentloaded'});
+  await expect(page.locator('main.app-content')).toBeVisible();
+  const offenders=englishOffenders(await page.locator('main.app-content').innerText());
+  if(offenders.length)report[module]=offenders;
+ }
+ expect(report,`Visible English copy remains in Persian modules:\n${JSON.stringify(report,null,2)}`).toEqual({});
+});
