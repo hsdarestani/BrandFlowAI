@@ -19,7 +19,7 @@ def test_asset_download_uses_single_file_streaming_route():
 def test_report_email_uses_single_brevo_route():
     routes = _matching_routes("/reports/{id}/send-email", "POST")
     assert len(routes) == 1
-    assert routes[0].name == "report_send_email_brevo"
+    assert routes[0].name == "reports_send_brevo_real"
 
 
 def test_calendar_week_generation_uses_single_ai_route():
