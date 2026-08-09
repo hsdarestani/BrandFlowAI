@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from . import models as m
+from .calendar_overrides import install_calendar_overrides
 from .database import get_db
 from .main import (
     ASSET_ROOT,
@@ -41,6 +42,7 @@ def _remove_route(path: str, method: str) -> None:
 
 _remove_route("/assets/{id}/download", "GET")
 _remove_route("/reports/{id}/send-email", "POST")
+install_calendar_overrides(app)
 
 
 @app.post("/onboarding/activate", name="onboarding_activate_safe")
