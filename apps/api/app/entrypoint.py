@@ -45,10 +45,11 @@ def _remove_route(path: str, method: str) -> None:
     ]
 
 
-# Remove duplicate legacy handlers before registering canonical production routes.
+# Remove duplicate/unsafe legacy handlers before registering canonical routes.
 _remove_route("/assets/{id}/download", "GET")
 _remove_route("/environment", "GET")
 _remove_route("/workspace/current", "GET")
+_remove_route("/brands/{id}/drafts", "POST")
 install_calendar_overrides(app)
 
 
@@ -83,6 +84,58 @@ def workspace_current_canonical(u=Depends(user_from_auth), db: Session = Depends
             if org and brand
             else None
         ),
+    }
+
+
+@app.post("/brands/{id}/drafts", name="draft_create_canonical")
+def draft_create_canonical(id: int, payload: dict, u=Depends(user_from_auth), db: Session = Depends(get_db)):
+    _, brand = org_brand_or_404(db, u, id)
+    calendar_item_id = payload.get("calendar_item_id")
+    if calendar_item_id is not None:
+        item = db.get(m.CalendarItem, calendar_item_id)
+        if not item or item.brand_id != brand.id:
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "calendar_item_invalid", "message": "Calendar item does not belong to this brand."},
+            )
+    draft = m.ContentDraft(
+        brand_id=brand.id,
+        calendar_item_id=calendar_item_id,
+        channel=str(payload.get("channel") or "assisted"),
+        content_type=str(payload.get("content_type") or "post"),
+        language=str(payload.get("language") or brand.primary_language or "en"),
+        title=str(payload.get("title") or "Untitled draft"),
+        body=str(payload.get("body") or ""),
+        status=str(payload.get("status") or "draft"),
+        created_by_user_id=u.id,
+    )
+    db.add(draft)
+    db.flush()
+    version = m.ContentVersion(
+        draft_id=draft.id,
+        version_number=1,
+        title=draft.title,
+        body=draft.body,
+        metadata_json=dict(payload.get("metadata") or {}),
+        created_by_user_id=u.id,
+        ai_generated=bool(payload.get("ai_generated", False)),
+    )
+    db.add(version)
+    db.flush()
+    draft.current_version_id = version.id
+    db.commit()
+    db.refresh(draft)
+    return {
+        "id": draft.id,
+        "brand_id": draft.brand_id,
+        "calendar_item_id": draft.calendar_item_id,
+        "channel": draft.channel,
+        "content_type": draft.content_type,
+        "language": draft.language,
+        "title": draft.title,
+        "body": draft.body,
+        "status": draft.status,
+        "current_version_id": draft.current_version_id,
     }
 
 
