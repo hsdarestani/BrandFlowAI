@@ -32,7 +32,7 @@ def test_openai_provider_uses_responses_and_strict_schema(monkeypatch):
         return FakeResponse()
 
     monkeypatch.setattr("app.services.ai.providers.httpx.post", fake_post)
-    provider = OpenAICompatibleProvider(api_key="test-key", model="gpt-5.1", timeout_seconds=12)
+    provider = OpenAICompatibleProvider(api_key="test-key", model="gpt-5.6-sol", timeout_seconds=12)
     schema = {
         "type": "object",
         "properties": {"answer": {"type": "string"}},
@@ -44,7 +44,7 @@ def test_openai_provider_uses_responses_and_strict_schema(monkeypatch):
     assert result == {"answer": "ok"}
     assert captured["url"] == "https://api.openai.com/v1/responses"
     assert captured["headers"]["Authorization"] == "Bearer test-key"
-    assert captured["body"]["model"] == "gpt-5.1"
+    assert captured["body"]["model"] == "gpt-5.6-sol"
     assert captured["body"]["store"] is False
     assert captured["body"]["text"]["format"]["type"] == "json_schema"
     assert captured["body"]["text"]["format"]["strict"] is True
