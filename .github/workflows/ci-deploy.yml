@@ -114,8 +114,10 @@ jobs:
         env:
           SSHPASS: ${{ secrets.PASS }}
           RELEASE_SHA: ${{ github.sha }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          sshpass -e ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@91.107.157.75 "RELEASE_SHA='$RELEASE_SHA' bash -s" <<'REMOTE'
+          OPENAI_API_KEY_B64="$(printf '%s' "$OPENAI_API_KEY" | base64 -w0)"
+          sshpass -e ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@91.107.157.75 "RELEASE_SHA='$RELEASE_SHA' OPENAI_API_KEY_B64='$OPENAI_API_KEY_B64' bash -s" <<'REMOTE'
           set -euo pipefail
 
           export DEBIAN_FRONTEND=noninteractive
@@ -170,6 +172,10 @@ jobs:
           AUTH_RATE_LIMIT_PER_MINUTE=12
           AI_PROVIDER=mock
           OPENAI_API_KEY=
+          OPENAI_MODEL=gpt-5.1
+          OPENAI_REASONING_EFFORT=high
+          OPENAI_TIMEOUT_SECONDS=90
+          OPENAI_MAX_OUTPUT_TOKENS=6000
           ANTHROPIC_API_KEY=
           GEMINI_API_KEY=
           CORS_ORIGINS=https://smarbiz.sbs,https://www.smarbiz.sbs
@@ -183,6 +189,44 @@ jobs:
           S3_ENDPOINT=
           S3_BUCKET=smarbiz-assets
           ENV
+          fi
+
+          if [ -n "${OPENAI_API_KEY_B64:-}" ]; then
+            export SMARBIZ_OPENAI_KEY="$(printf '%s' "$OPENAI_API_KEY_B64" | base64 -d)"
+            python3 - "$SHARED/.env.production" <<'PY'
+          import os
+          import sys
+
+          path = sys.argv[1]
+          updates = {
+              "AI_PROVIDER": "openai",
+              "OPENAI_API_KEY": os.environ["SMARBIZ_OPENAI_KEY"],
+              "OPENAI_MODEL": "gpt-5.1",
+              "OPENAI_REASONING_EFFORT": "high",
+              "OPENAI_TIMEOUT_SECONDS": "90",
+              "OPENAI_MAX_OUTPUT_TOKENS": "6000",
+          }
+          with open(path, "r", encoding="utf-8") as handle:
+              lines = handle.read().splitlines()
+          seen = set()
+          output = []
+          for line in lines:
+              key = line.split("=", 1)[0] if "=" in line else None
+              if key in updates:
+                  output.append(f"{key}={updates[key]}")
+                  seen.add(key)
+              else:
+                  output.append(line)
+          for key, value in updates.items():
+              if key not in seen:
+                  output.append(f"{key}={value}")
+          with open(path, "w", encoding="utf-8") as handle:
+              handle.write("\n".join(output) + "\n")
+          PY
+            unset SMARBIZ_OPENAI_KEY
+            echo "Production AI provider configured from GitHub secret."
+          else
+            echo "OPENAI_API_KEY GitHub secret is missing; AI calendar generation will stay unavailable until it is added."
           fi
 
           ln -sfn "$SHARED/.env.production" "$RELEASE/.env.production"
@@ -211,6 +255,16 @@ jobs:
             docker compose --env-file .env.production -f docker-compose.prod.yml ps
             docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=220 api web postgres
             exit 1
+          fi
+
+          if [ -n "${OPENAI_API_KEY_B64:-}" ]; then
+            docker compose --env-file .env.production -f docker-compose.prod.yml exec -T api python - <<'PY'
+          from app.services.ai.providers import get_ai_provider
+          provider = get_ai_provider()
+          assert provider.is_real, "Production AI provider did not initialize as real AI"
+          assert provider.model == "gpt-5.1", f"Unexpected production AI model: {provider.model}"
+          print("Production AI provider loaded:", provider.provider_name, provider.model)
+          PY
           fi
 
           test -f /etc/letsencrypt/live/smarbiz.sbs/fullchain.pem
