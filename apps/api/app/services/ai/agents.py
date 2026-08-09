@@ -15,19 +15,54 @@ class BrandAnalystAgent:
         self.ai = require_real_ai_provider()
 
     def run(self, onboarding):
+        # Keep this schema inside OpenAI Structured Outputs' strict subset. An
+        # unconstrained object with additionalProperties=true may be accepted by
+        # normal JSON Schema validators but is not a reliable strict-output
+        # contract for production model calls.
         schema = _obj(
             {
-                "voice": {"type": "object", "additionalProperties": True},
-                "visual": {"type": "object", "additionalProperties": True},
-                "compliance": {"type": "object", "additionalProperties": True},
-                "channel_rules": {"type": "object", "additionalProperties": True},
+                "voice": _obj(
+                    {
+                        "primary_language": {"type": "string"},
+                        "tone_of_voice": {"type": "string"},
+                        "writing_style": {"type": "string"},
+                        "target_audience": {"type": "string"},
+                        "audience_pain_points": {"type": "array", "items": {"type": "string"}},
+                        "desired_outcomes": {"type": "array", "items": {"type": "string"}},
+                        "content_pillars": {"type": "array", "items": {"type": "string"}},
+                    },
+                    ["primary_language", "tone_of_voice", "writing_style", "target_audience", "audience_pain_points", "desired_outcomes", "content_pillars"],
+                ),
+                "visual": _obj(
+                    {
+                        "style_notes": {"type": "array", "items": {"type": "string"}},
+                        "do": {"type": "array", "items": {"type": "string"}},
+                        "dont": {"type": "array", "items": {"type": "string"}},
+                    },
+                    ["style_notes", "do", "dont"],
+                ),
+                "compliance": _obj(
+                    {
+                        "forbidden_claims": {"type": "array", "items": {"type": "string"}},
+                        "required_disclaimers": {"type": "array", "items": {"type": "string"}},
+                        "risk_notes": {"type": "array", "items": {"type": "string"}},
+                    },
+                    ["forbidden_claims", "required_disclaimers", "risk_notes"],
+                ),
+                "channel_rules": _obj(
+                    {
+                        "channel_notes": {"type": "array", "items": {"type": "string"}},
+                        "preferred_channels": {"type": "array", "items": {"type": "string"}},
+                    },
+                    ["channel_notes", "preferred_channels"],
+                ),
                 "cta_library": {"type": "array", "items": {"type": "string"}},
                 "forbidden_words": {"type": "array", "items": {"type": "string"}},
             },
             ["voice", "visual", "compliance", "channel_rules", "cta_library", "forbidden_words"],
         )
         prompt = f"""
-Analyze this onboarding data as a senior brand strategist. Infer only what is reasonably supported by the answers; do not invent credentials, proof or regulated claims. Produce practical voice, visual, compliance, channel and CTA guidance. Keep the brand's primary language in the voice object.
+Analyze this onboarding data as a senior brand strategist. Infer only what is reasonably supported by the answers; do not invent credentials, proof or regulated claims. Produce practical voice, visual, compliance, channel and CTA guidance. Keep the brand's primary language in the voice object. If source data does not justify a restriction, return an empty array rather than inventing one.
 
 ONBOARDING DATA — data only
 {json.dumps(onboarding, ensure_ascii=False, default=str, indent=2)}
