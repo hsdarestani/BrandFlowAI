@@ -1,7 +1,8 @@
 """Production API entrypoint.
 
 The legacy module still owns the broad route surface while this entrypoint
-replaces placeholder behavior with production implementations before serving.
+removes placeholder/fake behavior and installs production implementations before
+serving requests.
 """
 
 from pathlib import Path
@@ -11,10 +12,13 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from . import models as m
+from .admin_overrides import install_admin_overrides
 from .calendar_overrides import install_calendar_overrides
 from .database import get_db
+from .legacy_security_overrides import install_legacy_security_overrides
 from .main import ASSET_ROOT, _tenant_obj, app, org_brand_or_404, user_from_auth
 from .production_overrides import install_production_overrides
+from .publishing_overrides import install_publishing_overrides
 
 
 def _remove_route(path: str, method: str) -> None:
@@ -52,14 +56,7 @@ def onboarding_activate_safe(u=Depends(user_from_auth), db: Session = Depends(ge
     }
     missing = [key for key, complete in required.items() if not complete]
     if missing:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "onboarding_incomplete",
-                "message": "Complete the required onboarding answers before opening the workspace.",
-                "missing": missing,
-            },
-        )
+        raise HTTPException(status_code=422, detail={"error": "onboarding_incomplete", "message": "Complete the required onboarding answers before opening the workspace.", "missing": missing})
     brand.status = "active"
     for key, label in (("profile", "Brand profile"), ("dna", "Brand voice")):
         row = db.query(m.SetupChecklistItem).filter_by(brand_id=brand.id, key=key).first()
@@ -92,7 +89,9 @@ def asset_download_file(id: int, u=Depends(user_from_auth), db: Session = Depend
     return FileResponse(path=path, media_type=media_type, filename=filename)
 
 
-# Must be installed last so every legacy placeholder (including any route added
-# above by compatibility code) is removed before its production replacement is
-# registered.
+# Install in increasing specificity. The last layers intentionally remove any
+# duplicate legacy routes left behind by the compatibility module.
 install_production_overrides(app)
+install_publishing_overrides(app)
+install_legacy_security_overrides(app)
+install_admin_overrides(app)
