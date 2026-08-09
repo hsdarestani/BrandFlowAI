@@ -43,6 +43,54 @@ _remove_route("/assets/{id}/download", "GET")
 _remove_route("/reports/{id}/send-email", "POST")
 
 
+@app.post("/onboarding/activate", name="onboarding_activate_safe")
+def onboarding_activate_safe(
+    u=Depends(user_from_auth),
+    db: Session = Depends(get_db),
+):
+    """Mark the current tenant brand active after the focused chat is complete.
+
+    Unlike the legacy onboarding completion endpoint, this route does not delete
+    or recreate products, DNA, channels, or other workspace records.
+    """
+
+    _, brand = org_brand_or_404(db, u)
+    dna = db.query(m.BrandDNA).filter_by(brand_id=brand.id).first()
+    voice = (dna.voice_json or {}) if dna else {}
+    pillars = voice.get("content_pillars") or []
+    if isinstance(pillars, str):
+        pillars = [item.strip() for item in pillars.split(",") if item.strip()]
+
+    required = {
+        "brand_name": bool(str(brand.name or "").strip()),
+        "brand_summary": bool(str(voice.get("brand_summary") or brand.description or "").strip()),
+        "target_audience": bool(str(voice.get("target_audience") or "").strip()),
+        "tone_of_voice": bool(str(voice.get("tone_of_voice") or "").strip()),
+        "content_pillars": len(pillars) >= 2,
+        "product_service": db.query(m.ProductService).filter_by(brand_id=brand.id).count() > 0,
+    }
+    missing = [key for key, complete in required.items() if not complete]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "onboarding_incomplete",
+                "message": "Complete the required onboarding answers before opening the workspace.",
+                "missing": missing,
+            },
+        )
+
+    brand.status = "active"
+    for key, label in (("profile", "Brand profile"), ("dna", "Brand voice")):
+        row = db.query(m.SetupChecklistItem).filter_by(brand_id=brand.id, key=key).first()
+        if not row:
+            row = m.SetupChecklistItem(brand_id=brand.id, key=key, label=label)
+        row.status = "done"
+        db.add(row)
+    db.commit()
+    return {"completed": True, "brand_id": brand.id, "status": brand.status}
+
+
 @app.get("/assets/{id}/download", name="asset_download_file")
 def asset_download_file(
     id: int,
