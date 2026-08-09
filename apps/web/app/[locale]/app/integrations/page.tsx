@@ -1,7 +1,7 @@
 import {AppShell} from '@/components/app-shell';
-import {IntegrationsPage} from '@/components/integrations-page';
+import {FunctionalIntegrationsPage} from '@/components/functional-integrations-page';
 
 export default async function Page({params}:{params:Promise<{locale:string}>}){
   const {locale}=await params;
-  return <AppShell locale={locale}><IntegrationsPage locale={locale}/></AppShell>;
+  return <AppShell locale={locale}><FunctionalIntegrationsPage locale={locale}/></AppShell>;
 }
