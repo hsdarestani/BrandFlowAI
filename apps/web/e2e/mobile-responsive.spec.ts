@@ -85,7 +85,7 @@ for(const viewport of viewports){
  });
 }
 
-test('auth and onboarding stay usable on a 320px phone and landscape phone',async({page,request})=>{
+test('auth and onboarding chat stay usable on a 320px phone and landscape phone',async({page,request})=>{
  for(const size of [{width:320,height:740},{width:844,height:390}]){
   await page.setViewportSize(size);
   await page.goto('/fa/auth/login');
@@ -99,8 +99,9 @@ test('auth and onboarding stay usable on a 320px phone and landscape phone',asyn
  await installSession(page,token);
  await page.setViewportSize({width:320,height:740});
  await page.goto('/fa/onboarding');
- await expect(page.getByRole('heading',{name:'نحوه کار کسب‌وکارت را به اسماربیز یاد بده'})).toBeVisible();
- await expectNoPageOverflow(page,'onboarding 320px');
+ await expect(page.getByRole('heading',{name:'اسماربیز را برای کسب‌وکار خودت می‌خواهی یا برای مشتری‌ها؟'})).toBeVisible();
+ await expect(page.getByText('سؤال 1 از 10',{exact:true})).toBeVisible();
+ await expectNoPageOverflow(page,'onboarding chat 320px');
  const buttons=await page.getByRole('button').evaluateAll(elements=>elements.filter(element=>getComputedStyle(element).display!=='none').map(element=>element.getBoundingClientRect().height));
  expect(Math.min(...buttons)).toBeGreaterThanOrEqual(38);
 });
