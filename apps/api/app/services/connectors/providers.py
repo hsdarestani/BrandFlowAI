@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 from urllib.parse import urljoin
 
@@ -89,11 +89,14 @@ class TelegramConnector(BaseConnector):
         }
 
     def send_message(self, chat_id, text, **kwargs):
-        if not str(chat_id or "").strip():
-            chat_id = getattr(self, "chat_id", None)
-        if not str(chat_id or "").strip():
+        chat_id = str(chat_id or getattr(self, "chat_id", "") or "").strip()
+        if not chat_id:
             raise ConnectorConfigurationError("Telegram chat_id is missing")
-        payload = {"chat_id": str(chat_id), "text": str(text), "disable_web_page_preview": bool(kwargs.get("disable_web_page_preview", False))}
+        payload = {
+            "chat_id": chat_id,
+            "text": str(text),
+            "disable_web_page_preview": bool(kwargs.get("disable_web_page_preview", False)),
+        }
         if kwargs.get("reply_markup"):
             payload["reply_markup"] = kwargs["reply_markup"]
         return self._call("sendMessage", payload)
@@ -338,8 +341,8 @@ class GA4Connector(BaseConnector):
         payload = self._run_report(property_id, creds, start_date=start_date, end_date=end_date, metrics=metrics)
         totals = (payload.get("totals") or [{}])[0].get("metricValues") or []
         if not totals and payload.get("rows"):
-            totals = (payload["rows"][0].get("metricValues") or [])
-        parsed: dict[str, float] = {}
+            totals = payload["rows"][0].get("metricValues") or []
+        parsed: dict[str, Any] = {}
         for metric, value in zip(metrics, totals):
             try:
                 parsed[metric] = float(value.get("value") or 0)
@@ -364,26 +367,43 @@ ASSISTED_PROVIDERS = {
     "bale_safir",
 }
 
-CONNECTORS: dict[str, BaseConnector] = {
-    "mock": MockConnector(),
-    "approval_link": ApprovalLinkConnector(),
-    "telegram": TelegramConnector(),
-    "bale": BaleConnector(),
-    "brevo": BrevoConnector(),
-    "woocommerce": WooCommerceConnector(),
-    "ga4": GA4Connector(),
-}
-for name in ASSISTED_PROVIDERS:
-    CONNECTORS[name] = AssistedConnector(name)
+
+def _new_connector(name: str) -> BaseConnector:
+    if name == "mock":
+        return MockConnector()
+    if name == "approval_link":
+        return ApprovalLinkConnector()
+    if name == "telegram":
+        return TelegramConnector()
+    if name == "bale":
+        return BaleConnector()
+    if name == "brevo":
+        return BrevoConnector()
+    if name == "woocommerce":
+        return WooCommerceConnector()
+    if name == "ga4":
+        return GA4Connector()
+    if name in ASSISTED_PROVIDERS:
+        return AssistedConnector(name)
+    raise ConnectorNotSupported(f"Unknown connector provider '{name}'")
+
+
+KNOWN_PROVIDERS = [
+    "approval_link",
+    "telegram",
+    "bale",
+    "brevo",
+    "woocommerce",
+    "ga4",
+    *sorted(ASSISTED_PROVIDERS),
+]
 
 
 def get_connector(provider: str) -> BaseConnector:
+    """Return a fresh connector instance so tenant credentials never leak across calls."""
     name = str(provider or "").strip().lower()
-    connector = CONNECTORS.get(name)
-    if not connector:
-        raise ConnectorNotSupported(f"Unknown connector provider '{name or provider}'")
-    return connector
+    return _new_connector(name)
 
 
 def connector_catalog():
-    return [{"provider": key, "capabilities": value.capabilities.__dict__} for key, value in CONNECTORS.items()]
+    return [{"provider": name, "capabilities": _new_connector(name).capabilities.__dict__} for name in KNOWN_PROVIDERS]
