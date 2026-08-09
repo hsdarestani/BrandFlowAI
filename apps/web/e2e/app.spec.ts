@@ -30,6 +30,8 @@ async function seedWorkspace(request:APIRequestContext,token:string){
  expect(product.ok(),await product.text()).toBeTruthy();
  const connector=await request.post(`${API_URL}/integrations/connections`,{headers,data:{provider:'approval_link',display_name:'لینک عمومی تأیید',config:{}}});
  expect([200,201,409]).toContain(connector.status());
+ const activate=await request.post(`${API_URL}/onboarding/activate`,{headers,data:{}});
+ expect(activate.ok(),await activate.text()).toBeTruthy();
  const week=await request.post(`${API_URL}/calendar/generate-week`,{headers,data:{week_start:new Date().toISOString()}});
  expect(week.status()).toBeLessThan(500);
 }
@@ -45,7 +47,7 @@ function captureRuntimeErrors(page:Page){
  const errors:string[]=[];
  page.on('pageerror',error=>errors.push(`pageerror: ${error.message}`));
  page.on('console',message=>{
-  if(message.type()==='error'&&!message.text().includes('favicon'))errors.push(`console: ${message.text()}`);
+  if(message.type()==='error'&&!message.text().includes('favicon'))errors.push(`console: ${message.text()}`));
  });
  return errors;
 }
