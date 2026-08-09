@@ -22,10 +22,10 @@ def test_report_email_uses_single_brevo_route():
     assert routes[0].name == "report_send_email_brevo"
 
 
-def test_calendar_week_generation_uses_single_brand_aware_route():
+def test_calendar_week_generation_uses_single_ai_route():
     routes = _matching_routes("/calendar/generate-week", "POST")
     assert len(routes) == 1
-    assert routes[0].name == "calendar_generate_week_brand_aware"
+    assert routes[0].name == "calendar_generate_week_ai"
 
 
 def test_brand_calendar_generation_routes_are_non_duplicate():
@@ -33,5 +33,5 @@ def test_brand_calendar_generation_routes_are_non_duplicate():
     regenerate = _matching_routes("/brands/{id}/calendar/regenerate-week", "POST")
     assert len(generate) == 1
     assert len(regenerate) == 1
-    assert generate[0].name == "brand_calendar_generate_week_brand_aware"
-    assert regenerate[0].name == "brand_calendar_regenerate_week_brand_aware"
+    assert generate[0].name == "brand_calendar_generate_week_ai"
+    assert regenerate[0].name == "brand_calendar_regenerate_week_ai"
