@@ -21,6 +21,8 @@ async function createMobileWorkspace(request:APIRequestContext){
  expect(product.ok(),await product.text()).toBeTruthy();
  const connector=await request.post(`${API_URL}/integrations/connections`,{headers:h,data:{provider:'approval_link',display_name:'لینک عمومی تأیید',config:{}}});
  expect([200,201,409]).toContain(connector.status());
+ const activate=await request.post(`${API_URL}/onboarding/activate`,{headers:h,data:{}});
+ expect(activate.ok(),await activate.text()).toBeTruthy();
  return token;
 }
 
