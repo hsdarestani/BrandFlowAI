@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from . import models as m
+from . import model_compat as _model_compat  # noqa: F401 - registers durable compatibility models/properties
 from .admin_overrides import install_admin_overrides
 from .calendar_overrides import install_calendar_overrides
 from .database import get_db
