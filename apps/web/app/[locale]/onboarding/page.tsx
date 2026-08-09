@@ -1,6 +1,6 @@
-import {OnboardingWizard} from '@/components/onboarding-wizard';
+import {OnboardingChat} from '@/components/onboarding-chat';
 
 export default async function Page({params}:{params:Promise<{locale:string}>}){
   const {locale}=await params;
-  return <OnboardingWizard locale={locale}/>;
+  return <OnboardingChat locale={locale}/>;
 }
