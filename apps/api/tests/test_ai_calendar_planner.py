@@ -1,7 +1,9 @@
 from datetime import date
 from types import SimpleNamespace
 
-from app.services.ai_calendar_planner import build_ai_week_plan, weekly_plan_schema
+import pytest
+
+from app.services.ai_calendar_planner import AIWeeklyPlanError, build_ai_week_plan, weekly_plan_schema
 
 
 class FakeAI:
@@ -49,6 +51,13 @@ class FakeAI:
                 },
             ],
         }
+
+
+class WrongCountAI(FakeAI):
+    def generate_json(self, prompt, schema=None, language="en"):
+        result = super().generate_json(prompt, schema=schema, language=language)
+        result["items"] = result["items"][:1]
+        return result
 
 
 def _fixtures():
@@ -99,11 +108,13 @@ def _fixtures():
     return brand, dna, [product], [persona]
 
 
-def test_weekly_schema_locks_count_and_channels():
+def test_weekly_schema_locks_channels_without_risky_array_keywords():
     schema = weekly_plan_schema(4, ["instagram", "linkedin"])
-    assert schema["properties"]["items"]["minItems"] == 4
-    assert schema["properties"]["items"]["maxItems"] == 4
-    assert schema["properties"]["items"]["items"]["properties"]["channel"]["enum"] == ["instagram", "linkedin"]
+    items = schema["properties"]["items"]
+    assert items["type"] == "array"
+    assert "minItems" not in items
+    assert "maxItems" not in items
+    assert items["items"]["properties"]["channel"]["enum"] == ["instagram", "linkedin"]
 
 
 def test_ai_week_plan_uses_model_output_and_brand_timezone():
@@ -137,3 +148,25 @@ def test_ai_week_plan_uses_model_output_and_brand_timezone():
     }
     assert "template generator" in fake.prompts[0]
     assert "توسعه‌دهنده‌ها و کسب‌وکارهای کوچک" in fake.prompts[0]
+
+
+def test_ai_week_plan_retries_then_rejects_wrong_item_count():
+    brand, dna, products, personas = _fixtures()
+    fake = WrongCountAI()
+    with pytest.raises(AIWeeklyPlanError, match="expected exactly 2 items"):
+        build_ai_week_plan(
+            brand=brand,
+            dna=dna,
+            products=products,
+            personas=personas,
+            rules=[],
+            memory_notes=[],
+            campaign=None,
+            channels=["instagram"],
+            week_start=date(2026, 8, 10),
+            count=2,
+            available_dates=[date(2026, 8, 10), date(2026, 8, 12), date(2026, 8, 14)],
+            provider=fake,
+        )
+    assert len(fake.prompts) == 2
+    assert "failed these deterministic checks" in fake.prompts[1]
