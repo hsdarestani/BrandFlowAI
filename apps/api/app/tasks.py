@@ -1,7 +1,8 @@
 """Background jobs for scheduled Smarbiz operations.
 
 Scheduled posts are published only when a real connector confirms success. The
-worker never treats assisted or test responses as direct publication.
+worker never treats assisted or test responses as direct publication in
+production.
 """
 
 from __future__ import annotations
@@ -62,6 +63,22 @@ def _configure_connector(connector: Any, credentials: dict[str, Any]) -> Any:
             except (AttributeError, TypeError):
                 pass
     return connector
+
+
+def _publish_with_compat(connector: Any, draft: m.ContentDraft, account: m.ChannelAccount):
+    """Support older/custom connector implementations that accept only draft.
+
+    The fallback is intentionally limited to Python signature compatibility. It
+    does not alter the response validation rules below, so production still
+    requires a provider-confirmed success/id.
+    """
+    try:
+        return connector.publish_post(draft, account=account)
+    except TypeError as exc:
+        message = str(exc)
+        if "unexpected keyword argument 'account'" not in message and 'unexpected keyword argument "account"' not in message:
+            raise
+        return connector.publish_post(draft)
 
 
 def _claim_scheduled_post(post_id: int) -> bool:
@@ -156,7 +173,7 @@ def publish_scheduled_post(self, post_id: int) -> dict[str, Any]:
 
             credentials = decrypt_credentials(account.credentials_encrypted_json or {})
             connector = _configure_connector(get_connector(account.provider), credentials)
-            response = connector.publish_post(draft, account=account)
+            response = _publish_with_compat(connector, draft, account)
             if not isinstance(response, dict):
                 raise RuntimeError("Connector returned an invalid response")
 
@@ -171,7 +188,11 @@ def publish_scheduled_post(self, post_id: int) -> dict[str, Any]:
                 post.error_message = "Direct publishing is unavailable; an assisted publishing kit was prepared."
                 db.commit()
                 return {"ok": True, "post_id": post_id, "status": "assisted", "assisted_publish_url": post.assisted_publish_url}
-            if response_status not in REAL_SUCCESS_STATUSES:
+
+            # Explicit test/dev environments may exercise MockConnector. It is
+            # accepted there only; production has already rejected it above.
+            confirmed_status = response_status in REAL_SUCCESS_STATUSES or (is_mock and settings.allow_mock_connectors and response_status == "mock_published")
+            if not confirmed_status:
                 message = response.get("error") or response.get("message") or f"Connector did not confirm publication (status={response_status or 'missing'})"
                 raise RuntimeError(str(message))
 
