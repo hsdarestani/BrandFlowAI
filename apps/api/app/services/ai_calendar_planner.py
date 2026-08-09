@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any
 
-from .ai.providers import AIConfigurationError, AIProvider, AIProviderError, get_ai_provider
+from .ai.providers import AIConfigurationError, AIProvider, get_ai_provider
 from .calendar_planner import CONTENT_CHANNELS, safe_zone
 
 
@@ -112,6 +112,9 @@ def _campaign_out(campaign) -> dict[str, Any] | None:
 
 
 def weekly_plan_schema(count: int, channels: list[str]) -> dict[str, Any]:
+    # The exact item count is enforced by the prompt and by deterministic
+    # validation below. Keep the model-side JSON Schema to the conservative
+    # Structured Outputs subset instead of relying on array-length keywords.
     allowed_channels = [channel for channel in channels if channel in CONTENT_CHANNELS] or ["instagram"]
     nullable_integer = {"type": ["integer", "null"]}
     return {
@@ -120,8 +123,6 @@ def weekly_plan_schema(count: int, channels: list[str]) -> dict[str, Any]:
             "strategy_summary": {"type": "string"},
             "items": {
                 "type": "array",
-                "minItems": count,
-                "maxItems": count,
                 "items": {
                     "type": "object",
                     "properties": {
