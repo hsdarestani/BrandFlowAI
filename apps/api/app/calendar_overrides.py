@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
+import re
 
 from fastapi import Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -11,6 +12,7 @@ from .database import get_db
 from .services.calendar_planner import (
     CONTENT_CHANNELS,
     build_week_plan,
+    listify,
     local_week_start,
     recommended_plan_size,
     safe_zone,
@@ -19,6 +21,7 @@ from .services.calendar_planner import (
 
 _ORIGINAL_CALENDAR_ITEM_OUT = legacy_main.calendar_item_out
 _INSTALLED = False
+_LEGACY_TITLE = re.compile(r"^Draft content idea \d+$", re.IGNORECASE)
 
 
 def _remove_route(app, path: str, method: str) -> None:
@@ -38,7 +41,7 @@ def _calendar_item_out_local(item, db: Session):
 
     PostgreSQL stores timestamptz instants and normally returns UTC. Returning an
     ISO timestamp with the configured offset keeps the calendar drawer from
-    showing raw UTC (for example 06:30 instead of 10:00 in Tehran).
+    showing raw UTC (for example 06:30 instead of the intended local time).
     """
 
     out = _ORIGINAL_CALENDAR_ITEM_OUT(item, db)
@@ -54,28 +57,46 @@ def _calendar_item_out_local(item, db: Session):
     return out
 
 
-def _connected_content_channels(db: Session, brand_id: int, requested: list[str] | None) -> list[str]:
-    if requested:
-        clean = []
-        for channel in requested:
-            value = str(channel).strip().lower()
-            if value in CONTENT_CHANNELS and value not in clean:
-                clean.append(value)
-        if clean:
-            return clean
+def _append_channel(target: list[str], value) -> None:
+    channel = str(value or "").strip().lower().replace(" ", "_")
+    if channel in CONTENT_CHANNELS and channel not in target:
+        target.append(channel)
 
-    rows = (
-        db.query(m.ChannelAccount)
-        .filter_by(brand_id=brand_id)
-        .filter(m.ChannelAccount.connection_status.in_(["connected", "mock_connected", "mock"]))
-        .all()
-    )
-    clean = []
-    for row in rows:
-        provider = str(row.provider or "").strip().lower()
-        if provider in CONTENT_CHANNELS and provider not in clean:
-            clean.append(provider)
-    return clean
+
+def _preferred_content_channels(
+    db: Session,
+    brand_id: int,
+    dna,
+    requested: list[str] | None,
+) -> list[str]:
+    """Resolve channels for planning, independent of publishing OAuth.
+
+    A content idea can be planned before a provider is connected. Publishing and
+    scheduling continue to enforce the actual connector requirement elsewhere.
+    """
+
+    clean: list[str] = []
+    for channel in requested or []:
+        _append_channel(clean, channel)
+    if clean:
+        return clean
+
+    # A saved account is a strong preference even when its OAuth connection is
+    # not complete yet.
+    for row in db.query(m.ChannelAccount).filter_by(brand_id=brand_id).all():
+        _append_channel(clean, row.provider)
+
+    channel_rules = (getattr(dna, "channel_rules_json", None) or {}) if dna else {}
+    for note in listify(channel_rules.get("channel_notes")):
+        # Onboarding normally stores bare provider ids, but tolerate a short note
+        # containing one of the known provider names.
+        normalized = note.strip().lower().replace(" ", "_")
+        _append_channel(clean, normalized)
+        for candidate in CONTENT_CHANNELS:
+            if candidate in normalized:
+                _append_channel(clean, candidate)
+
+    return clean or ["instagram"]
 
 
 def _week_bounds(week_date, timezone_name: str):
@@ -83,6 +104,19 @@ def _week_bounds(week_date, timezone_name: str):
     local_start = datetime.combine(week_date, time.min, tzinfo=tz)
     local_end = local_start + timedelta(days=7)
     return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
+
+
+def _is_legacy_placeholder(item) -> bool:
+    """Identify only the unmistakable items created by the old hard-coded loop."""
+
+    title = str(item.title or "").strip()
+    description = str(item.description or "").strip()
+    return bool(
+        _LEGACY_TITLE.fullmatch(title)
+        and description.startswith("Draft weekly plan for ")
+        and "Review before publishing" in description
+        and (item.status or "") in {"draft", "idea", "planned"}
+    )
 
 
 def install_calendar_overrides(app) -> None:
@@ -110,13 +144,21 @@ def install_calendar_overrides(app) -> None:
     ):
         _, brand = legacy_main.org_brand_or_404(db, u, data.brand_id)
         setup = legacy_main.setup_state(db, brand)
-        if not setup["can_generate_week"]:
+        # Planning content only requires real brand knowledge and an offer.
+        # Publishing-channel OAuth and approval integrations are enforced later,
+        # when the user schedules/sends content.
+        blocking = [
+            item
+            for item in setup["missing_requirements"]
+            if item.get("id") in {"brand_pulse", "product_service"}
+        ]
+        if blocking:
             raise HTTPException(
                 status_code=422,
                 detail={
-                    "message": "Complete setup before generating a week",
-                    "missing_requirements": setup["missing_requirements"],
-                    "action_links": setup["missing_requirements"],
+                    "message": "Complete Brand Pulse and add an offer before generating a week",
+                    "missing_requirements": blocking,
+                    "action_links": blocking,
                 },
             )
 
@@ -124,17 +166,7 @@ def install_calendar_overrides(app) -> None:
         products = db.query(m.ProductService).filter_by(brand_id=brand.id).order_by(m.ProductService.id.asc()).all()
         personas = db.query(m.Persona).filter_by(brand_id=brand.id).order_by(m.Persona.id.asc()).all()
         rules = db.query(m.BrandRule).filter_by(brand_id=brand.id, is_active=True).order_by(m.BrandRule.id.asc()).all()
-        channels = _connected_content_channels(db, brand.id, data.channels)
-        if not channels:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "message": "Connect at least one publishing content channel before generating a week",
-                    "missing_requirements": [
-                        {"id": "channels", "title": "No publishing content channel connected", "action_href": "/app/integrations"}
-                    ],
-                },
-            )
+        channels = _preferred_content_channels(db, brand.id, dna, data.channels)
 
         voice = (dna.voice_json or {}) if dna else {}
         target_count = recommended_plan_size(voice, channels)
@@ -151,11 +183,24 @@ def install_calendar_overrides(app) -> None:
             .all()
         )
 
+        # The previous implementation created seven unmistakable English
+        # placeholders. On the next Generate action, replace only those legacy
+        # records, while preserving every manually edited/real calendar item.
+        legacy_items = [item for item in existing if _is_legacy_placeholder(item)]
+        if legacy_items:
+            for item in legacy_items:
+                db.delete(item)
+            db.flush()
+            existing = [item for item in existing if item not in legacy_items]
+
         remaining = max(0, target_count - len(existing))
         if remaining == 0:
+            if legacy_items:
+                db.commit()
             return {
                 "items": [_calendar_item_out_local(item, db) for item in existing],
                 "created_count": 0,
+                "replaced_legacy_count": len(legacy_items),
                 "target_count": target_count,
                 "message": "This week already has enough planned content.",
             }
@@ -217,9 +262,11 @@ def install_calendar_overrides(app) -> None:
         return {
             "items": [_calendar_item_out_local(item, db) for item in made],
             "created_count": len(made),
+            "replaced_legacy_count": len(legacy_items),
             "target_count": target_count,
             "week_start": week_date.isoformat(),
             "timezone": brand.timezone,
+            "channels": channels,
         }
 
     @app.post("/brands/{id}/calendar/generate-week", name="brand_calendar_generate_week_brand_aware")
@@ -236,6 +283,6 @@ def install_calendar_overrides(app) -> None:
         u=Depends(legacy_main.user_from_auth),
         db: Session = Depends(get_db),
     ):
-        # Non-destructive by design: fill missing slots instead of deleting user
-        # edits, approvals, drafts, or published history.
+        # Non-destructive by design: legacy placeholders may be replaced, while
+        # real user edits, approvals, drafts, and published history are preserved.
         return generate_week(legacy_main.CalendarGenerateIn(brand_id=id), u, db)
