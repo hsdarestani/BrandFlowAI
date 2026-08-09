@@ -260,10 +260,23 @@ jobs:
           if [ -n "${OPENAI_API_KEY_B64:-}" ]; then
             docker compose --env-file .env.production -f docker-compose.prod.yml exec -T api python - <<'PY'
           from app.services.ai.providers import get_ai_provider
+
           provider = get_ai_provider()
           assert provider.is_real, "Production AI provider did not initialize as real AI"
           assert provider.model == "gpt-5.6-sol", f"Unexpected production AI model: {provider.model}"
-          print("Production AI provider loaded:", provider.provider_name, provider.model)
+          schema = {
+              "type": "object",
+              "properties": {"ok": {"type": "boolean"}},
+              "required": ["ok"],
+              "additionalProperties": False,
+          }
+          result = provider.generate_json(
+              "Production deployment smoke test. Return ok=true and nothing else.",
+              schema=schema,
+              language="en",
+          )
+          assert result.get("ok") is True, f"Unexpected OpenAI smoke-test output: {result}"
+          print("Production AI live call passed:", provider.provider_name, provider.model)
           PY
           fi
 
