@@ -5,6 +5,7 @@ removes placeholder/fake behavior and installs production implementations before
 serving requests.
 """
 
+import os
 from pathlib import Path
 
 from fastapi import Depends, HTTPException
@@ -14,10 +15,20 @@ from sqlalchemy.orm import Session
 from . import models as m
 from . import model_compat as _model_compat  # noqa: F401 - registers durable compatibility models/properties
 from .admin_overrides import install_admin_overrides
+from .approval_delivery_overrides import install_approval_delivery_overrides
 from .calendar_overrides import install_calendar_overrides
 from .database import get_db
 from .legacy_security_overrides import install_legacy_security_overrides
-from .main import ASSET_ROOT, _tenant_obj, app, org_brand_or_404, user_from_auth
+from .main import (
+    ASSET_ROOT,
+    _tenant_obj,
+    active_brand,
+    app,
+    build_home_overview,
+    current_org,
+    org_brand_or_404,
+    user_from_auth,
+)
 from .production_overrides import install_production_overrides
 from .publishing_overrides import install_publishing_overrides
 
@@ -34,8 +45,45 @@ def _remove_route(path: str, method: str) -> None:
     ]
 
 
+# Remove duplicate legacy handlers before registering canonical production routes.
 _remove_route("/assets/{id}/download", "GET")
+_remove_route("/environment", "GET")
+_remove_route("/workspace/current", "GET")
 install_calendar_overrides(app)
+
+
+@app.get("/environment", name="environment_canonical")
+def environment_canonical():
+    demo_mode = os.getenv("DEMO_MODE", "false").strip().lower() == "true"
+    return {
+        "demo_mode": demo_mode,
+        "mode": "Demo mode" if demo_mode else "Production mode",
+    }
+
+
+@app.get("/workspace/current", name="workspace_current_canonical")
+def workspace_current_canonical(u=Depends(user_from_auth), db: Session = Depends(get_db)):
+    org = current_org(db, u)
+    brand = active_brand(db, org)
+    return {
+        "user": {"id": u.id, "name": u.name or "User", "email": u.email},
+        "organization": ({"id": org.id, "name": org.name, "mode": org.mode} if org else None),
+        "brand": (
+            {
+                "id": brand.id,
+                "name": brand.name,
+                "primary_language": brand.primary_language,
+                "timezone": brand.timezone,
+            }
+            if brand
+            else None
+        ),
+        "recommended_action": (
+            build_home_overview(db, u).get("recommended_action")
+            if org and brand
+            else None
+        ),
+    }
 
 
 @app.post("/onboarding/activate", name="onboarding_activate_safe")
@@ -94,5 +142,6 @@ def asset_download_file(id: int, u=Depends(user_from_auth), db: Session = Depend
 # duplicate legacy routes left behind by the compatibility module.
 install_production_overrides(app)
 install_publishing_overrides(app)
+install_approval_delivery_overrides(app)
 install_legacy_security_overrides(app)
 install_admin_overrides(app)
