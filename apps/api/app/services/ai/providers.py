@@ -83,7 +83,7 @@ class OpenAICompatibleProvider(AIProvider):
         self.api_key = (api_key or os.getenv("OPENAI_API_KEY") or "").strip()
         if not self.api_key:
             raise AIConfigurationError("OPENAI_API_KEY is not configured")
-        self.model = (model or os.getenv("OPENAI_MODEL") or "gpt-5.1").strip()
+        self.model = (model or os.getenv("OPENAI_MODEL") or "gpt-5.6-sol").strip()
         self.base_url = (base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
         self.timeout_seconds = float(timeout_seconds or os.getenv("OPENAI_TIMEOUT_SECONDS") or 90)
         self.reasoning_effort = (os.getenv("OPENAI_REASONING_EFFORT") or "high").strip().lower()
@@ -100,7 +100,6 @@ class OpenAICompatibleProvider(AIProvider):
                     parts.append(str(content["text"]))
         if parts:
             return "".join(parts).strip()
-        # Some compatible gateways expose the SDK convenience field directly.
         if payload.get("output_text"):
             return str(payload["output_text"]).strip()
         return ""
