@@ -1,9 +1,7 @@
 """Background jobs for scheduled Smarbiz operations.
 
-The first production job processes due scheduled posts. It uses an optimistic
-claim so multiple workers cannot publish the same post at the same time, keeps
-retries bounded, and never treats an assisted or mocked response as a real
-publication when mock connectors are disabled.
+Scheduled posts are published only when a real connector confirms success. The
+worker never treats assisted or test responses as direct publication.
 """
 
 from __future__ import annotations
@@ -17,6 +15,7 @@ from sqlalchemy import update
 from . import models as m
 from .database import SessionLocal, settings
 from .services.connectors.providers import get_connector
+from .services.connectors.secrets import decrypt_credentials
 
 
 celery_app = Celery(
@@ -54,18 +53,10 @@ def _now() -> datetime:
 
 
 def _configure_connector(connector: Any, credentials: dict[str, Any]) -> Any:
-    """Expose saved connector configuration to legacy connector classes.
-
-    Connector implementations in the MVP use small provider objects rather
-    than a common constructor contract. Setting only public string/number/bool
-    values keeps the bridge explicit while existing providers are migrated to
-    dependency-injected constructors.
-    """
-
     for key, value in credentials.items():
         if not isinstance(key, str) or key.startswith("_"):
             continue
-        if isinstance(value, (str, int, float, bool)) or value is None:
+        if isinstance(value, (str, int, float, bool, dict, list)) or value is None:
             try:
                 setattr(connector, key, value)
             except (AttributeError, TypeError):
@@ -112,8 +103,6 @@ def _fail(post_id: int, message: str) -> dict[str, Any]:
 
 @celery_app.task(name="smarbiz.publish_due_posts")
 def publish_due_posts(batch_size: int = 100) -> dict[str, Any]:
-    """Queue all posts whose scheduled time has arrived."""
-
     now = _now()
     with SessionLocal() as db:
         rows = (
@@ -133,14 +122,8 @@ def publish_due_posts(batch_size: int = 100) -> dict[str, Any]:
     return {"ok": True, "queued": len(ids), "post_ids": ids}
 
 
-@celery_app.task(
-    name="smarbiz.publish_scheduled_post",
-    bind=True,
-    autoretry_for=(),
-)
+@celery_app.task(name="smarbiz.publish_scheduled_post", bind=True, autoretry_for=())
 def publish_scheduled_post(self, post_id: int) -> dict[str, Any]:
-    """Publish one scheduled post exactly once when the connector confirms it."""
-
     if not _claim_scheduled_post(post_id):
         return {"ok": True, "post_id": post_id, "status": "already_claimed"}
 
@@ -156,79 +139,46 @@ def publish_scheduled_post(self, post_id: int) -> dict[str, Any]:
             if not account:
                 raise RuntimeError("Linked channel connection no longer exists")
 
-            existing = (
-                db.query(m.PublishedPost)
-                .filter_by(draft_id=draft.id, channel_account_id=account.id)
-                .first()
-            )
+            existing = db.query(m.PublishedPost).filter_by(draft_id=draft.id, channel_account_id=account.id).first()
             if existing:
                 post.status = "published"
                 post.provider_post_id = existing.provider_post_id
                 draft.status = "published"
                 db.commit()
-                return {
-                    "ok": True,
-                    "post_id": post_id,
-                    "status": "already_published",
-                    "published_post_id": existing.id,
-                }
+                return {"ok": True, "post_id": post_id, "status": "already_published", "published_post_id": existing.id}
 
             if account.connection_status != "connected":
-                raise RuntimeError(
-                    f"Connector {account.provider} is not connected "
-                    f"(status={account.connection_status})"
-                )
+                raise RuntimeError(f"Connector {account.provider} is not connected (status={account.connection_status})")
             if account.provider == "mock" and not settings.allow_mock_connectors:
                 raise RuntimeError("Mock publishing is disabled in this environment")
-            if account.provider in {"approval_link", "ga4", "woocommerce"}:
-                raise RuntimeError(f"Connector {account.provider} cannot publish content")
+            if account.provider in {"approval_link", "ga4", "woocommerce", "brevo"}:
+                raise RuntimeError(f"Connector {account.provider} cannot publish social content")
 
-            connector = _configure_connector(
-                get_connector(account.provider),
-                dict(account.credentials_encrypted_json or {}),
-            )
-            response = connector.publish_post(draft)
+            credentials = decrypt_credentials(account.credentials_encrypted_json or {})
+            connector = _configure_connector(get_connector(account.provider), credentials)
+            response = connector.publish_post(draft, account=account)
             if not isinstance(response, dict):
                 raise RuntimeError("Connector returned an invalid response")
 
             response_status = str(response.get("status") or "").lower()
             is_mock = bool(response.get("mock")) or response_status.startswith("mock")
-            is_assisted = response_status in {"assisted", "prepared", "manual"}
+            is_assisted = response_status in {"assisted", "prepared", "manual", "needs_manual_action"}
             if is_mock and not settings.allow_mock_connectors:
                 raise RuntimeError("Connector returned a mock publishing result")
             if is_assisted:
                 post.status = "assisted"
-                post.assisted_publish_url = response.get("url") or response.get(
-                    "assisted_publish_url"
-                )
-                post.error_message = (
-                    "Direct publishing is unavailable; an assisted publishing kit was prepared."
-                )
+                post.assisted_publish_url = response.get("url") or response.get("assisted_publish_url")
+                post.error_message = "Direct publishing is unavailable; an assisted publishing kit was prepared."
                 db.commit()
-                return {
-                    "ok": True,
-                    "post_id": post_id,
-                    "status": "assisted",
-                    "assisted_publish_url": post.assisted_publish_url,
-                }
+                return {"ok": True, "post_id": post_id, "status": "assisted", "assisted_publish_url": post.assisted_publish_url}
             if response_status not in REAL_SUCCESS_STATUSES:
-                message = response.get("error") or response.get("message") or (
-                    f"Connector did not confirm publication (status={response_status or 'missing'})"
-                )
+                message = response.get("error") or response.get("message") or f"Connector did not confirm publication (status={response_status or 'missing'})"
                 raise RuntimeError(str(message))
 
-            provider_post_id = str(
-                response.get("provider_post_id")
-                or response.get("message_id")
-                or response.get("id")
-                or f"{account.provider}-{post.id}"
-            )
-            public_url = str(
-                response.get("public_url")
-                or response.get("url")
-                or response.get("permalink")
-                or ""
-            )
+            provider_post_id = str(response.get("provider_post_id") or response.get("message_id") or response.get("id") or "")
+            if not provider_post_id:
+                raise RuntimeError("Provider confirmed success without a provider post/message id")
+            public_url = str(response.get("public_url") or response.get("url") or response.get("permalink") or "")
             published = m.PublishedPost(
                 draft_id=draft.id,
                 channel_account_id=account.id,
@@ -241,7 +191,7 @@ def publish_scheduled_post(self, post_id: int) -> dict[str, Any]:
                     "connector_response": {
                         key: value
                         for key, value in response.items()
-                        if key not in {"token", "api_key", "secret", "credentials"}
+                        if key not in {"token", "api_key", "secret", "credentials", "consumer_secret"}
                     },
                 },
             )
@@ -260,5 +210,5 @@ def publish_scheduled_post(self, post_id: int) -> dict[str, Any]:
                 "provider_post_id": provider_post_id,
                 "public_url": public_url,
             }
-    except Exception as exc:  # Celery must persist the failure state, not crash-loop.
+    except Exception as exc:
         return _fail(post_id, str(exc))
