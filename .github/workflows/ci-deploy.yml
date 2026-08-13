@@ -55,6 +55,41 @@ jobs:
           path: apps/api/pytest.log
           if-no-files-found: ignore
 
+      - name: PostgreSQL migration smoke test
+        working-directory: apps/api
+        run: |
+          set -euo pipefail
+          NAME=smarbiz-ci-postgres
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
+          docker run -d \
+            --name "$NAME" \
+            -e POSTGRES_DB=smarbiz_ci \
+            -e POSTGRES_USER=smarbiz \
+            -e POSTGRES_PASSWORD=smarbiz-ci-password \
+            -p 127.0.0.1:55432:5432 \
+            pgvector/pgvector:pg16 >/dev/null
+          cleanup() {
+            STATUS=$?
+            if [ "$STATUS" -ne 0 ]; then
+              echo "PostgreSQL migration smoke test failed. Database logs:"
+              docker logs "$NAME" || true
+            fi
+            docker rm -f "$NAME" >/dev/null 2>&1 || true
+            exit "$STATUS"
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 40); do
+            if docker exec "$NAME" pg_isready -U smarbiz -d smarbiz_ci >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec "$NAME" pg_isready -U smarbiz -d smarbiz_ci
+          DATABASE_URL='postgresql+psycopg://smarbiz:smarbiz-ci-password@127.0.0.1:55432/smarbiz_ci' alembic upgrade head
+          CURRENT=$(DATABASE_URL='postgresql+psycopg://smarbiz:smarbiz-ci-password@127.0.0.1:55432/smarbiz_ci' alembic current)
+          echo "$CURRENT"
+          echo "$CURRENT" | grep -q '(head)'
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -230,10 +265,56 @@ jobs:
           fi
 
           ln -sfn "$SHARED/.env.production" "$RELEASE/.env.production"
+          PREVIOUS_CURRENT="$(readlink -f "$BASE/current" 2>/dev/null || true)"
           ln -sfn "$RELEASE" "$BASE/current"
           cd "$BASE/current"
 
-          docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build --remove-orphans
+          health_ready() {
+            curl --fail --silent --show-error --max-time 4 http://127.0.0.1:18000/health >/dev/null 2>&1 \
+              && curl --fail --silent --show-error --max-time 4 http://127.0.0.1:13000/en >/dev/null 2>&1
+          }
+
+          rollback_last_good() {
+            LAST_GOOD="$(readlink -f "$BASE/last-good" 2>/dev/null || true)"
+            CURRENT_RELEASE="$(readlink -f "$BASE/current" 2>/dev/null || true)"
+            if [ -z "$LAST_GOOD" ] || [ ! -d "$LAST_GOOD" ] || [ "$LAST_GOOD" = "$CURRENT_RELEASE" ]; then
+              echo "No distinct last-known-good release is available for rollback."
+              return 1
+            fi
+
+            DB_REV="$(cd "$CURRENT_RELEASE" 2>/dev/null && docker compose --env-file .env.production -f docker-compose.prod.yml run --rm --no-deps --entrypoint alembic api current 2>/dev/null | sed -n 's/^\([0-9A-Za-z_-][0-9A-Za-z_-]*\).*/\1/p' | head -n1 || true)"
+            if [ -z "$DB_REV" ] || ! grep -Rqs "revision = [\"']$DB_REV[\"']" "$LAST_GOOD/apps/api/alembic/versions"; then
+              echo "Rollback skipped: database revision '${DB_REV:-unknown}' is not proven compatible with last-known-good code."
+              return 1
+            fi
+
+            echo "Rolling production back to last-known-good release $LAST_GOOD (database revision $DB_REV)."
+            ln -sfn "$LAST_GOOD" "$BASE/current"
+            cd "$BASE/current"
+            if ! docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build --remove-orphans; then
+              echo "Rollback compose startup failed."
+              docker compose --env-file .env.production -f docker-compose.prod.yml logs --no-color --tail=220 api web postgres || true
+              return 1
+            fi
+            for _ in $(seq 1 30); do
+              if health_ready; then
+                echo "Rollback restored healthy API and web services."
+                return 0
+              fi
+              sleep 4
+            done
+            echo "Rollback release did not become healthy."
+            docker compose --env-file .env.production -f docker-compose.prod.yml logs --no-color --tail=220 api web postgres || true
+            return 1
+          }
+
+          if ! docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build --remove-orphans; then
+            echo "New release failed during Compose startup. Capturing diagnostics before exiting."
+            docker compose --env-file .env.production -f docker-compose.prod.yml ps -a || true
+            docker compose --env-file .env.production -f docker-compose.prod.yml logs --no-color --tail=260 api web postgres redis || true
+            rollback_last_good || true
+            exit 1
+          fi
 
           API_READY=0
           WEB_READY=0
@@ -252,8 +333,9 @@ jobs:
 
           if [ "$API_READY" != "1" ] || [ "$WEB_READY" != "1" ]; then
             echo "Loopback API or web service did not become healthy."
-            docker compose --env-file .env.production -f docker-compose.prod.yml ps
-            docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail=220 api web postgres
+            docker compose --env-file .env.production -f docker-compose.prod.yml ps -a || true
+            docker compose --env-file .env.production -f docker-compose.prod.yml logs --no-color --tail=260 api web postgres redis || true
+            rollback_last_good || true
             exit 1
           fi
 
@@ -318,10 +400,28 @@ jobs:
             --resolve smarbiz.sbs:443:127.0.0.1 \
             https://smarbiz.sbs/en | grep -qi 'Smarbiz'
 
+          # Only a release that passed containers, migrations, loopback health, Nginx,
+          # TLS, API, and landing-page checks becomes the rollback target.
+          ln -sfn "$RELEASE" "$BASE/last-good"
+          echo "Recorded last-known-good release: $RELEASE"
+
           docker image prune -f
-          find "$BASE/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +4 | cut -d' ' -f2- | xargs -r rm -rf
+
+          CURRENT_PATH="$(readlink -f "$BASE/current" 2>/dev/null || true)"
+          LAST_GOOD_PATH="$(readlink -f "$BASE/last-good" 2>/dev/null || true)"
+          mapfile -t OLD_RELEASES < <(find "$BASE/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +6 | cut -d' ' -f2-)
+          for OLD in "${OLD_RELEASES[@]:-}"; do
+            [ -n "$OLD" ] || continue
+            if [ "$OLD" = "$CURRENT_PATH" ] || [ "$OLD" = "$LAST_GOOD_PATH" ]; then
+              echo "Preserving protected release $OLD"
+              continue
+            fi
+            rm -rf "$OLD"
+          done
+
           ufw status verbose
           docker compose --env-file .env.production -f docker-compose.prod.yml ps
+          echo "Previous current release was: ${PREVIOUS_CURRENT:-none}"
           REMOTE
 
       - name: Report production deployment
@@ -343,12 +443,12 @@ jobs:
               `- Commit: \`${context.sha}\``,
               `- SSH preflight: **${process.env.PREFLIGHT_CONCLUSION || 'not run'}**`,
               `- Release upload: **${process.env.UPLOAD_CONCLUSION || 'not run'}**`,
-              `- Containers, migrations, Nginx, and origin health: **${process.env.DEPLOY_CONCLUSION || 'not run'}**`,
+              `- Containers, PostgreSQL migrations, rollback guard, Nginx, and origin health: **${process.env.DEPLOY_CONCLUSION || 'not run'}**`,
               `- Workflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               '',
               success
-                ? 'PostgreSQL, Redis, API, Web, Nginx, and all origin health endpoints passed.'
-                : 'Open the workflow link for the exact failing command.',
+                ? 'PostgreSQL migration gate, PostgreSQL, Redis, API, Web, Nginx, origin health, and last-known-good recording passed.'
+                : 'The workflow now captures production logs before exit and attempts a database-compatible rollback to the last-known-good release.',
             ].join('\n');
             const {data: issues} = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
