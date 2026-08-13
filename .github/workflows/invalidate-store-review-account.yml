@@ -1,0 +1,53 @@
+name: Invalidate Smarbiz Store Review Account
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/invalidate-store-review-account.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  invalidate:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 10
+    steps:
+      - name: Install SSH client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+
+      - name: Revoke prior review users and JWT subjects
+        env:
+          SSHPASS: ${{ secrets.PASS }}
+        run: |
+          set -euo pipefail
+          test -n "$SSHPASS"
+          sshpass -e ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@91.107.157.75 <<'REMOTE'
+          set -euo pipefail
+          cd /opt/smarbiz/current
+          docker compose --env-file .env.production -f docker-compose.prod.yml exec -T api python - <<'PY'
+          import secrets
+          from app.database import SessionLocal
+          from app import models as m
+          from app.security import hash_password
+
+          db = SessionLocal()
+          try:
+              rows = db.query(m.User).filter(m.User.email.like('smarbiz-review-%@aplus-solution.de')).all()
+              for user in rows:
+                  # Changing the email immediately invalidates every existing JWT,
+                  # because JWT subjects are the login email and auth resolves by email.
+                  user.email = f'disabled-review-{user.id}-{secrets.token_hex(8)}@invalid.local'
+                  user.password_hash = hash_password(secrets.token_urlsafe(48))
+                  user.is_active = False
+              db.commit()
+              print(f'invalidated_review_users={len(rows)}')
+          finally:
+              db.close()
+          PY
+          REMOTE
