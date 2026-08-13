@@ -40,5 +40,46 @@ for(const [fileName,banned] of Object.entries(localizedFiles)){
  }
 }
 
+const approvalsFile='app/[locale]/app/approvals/page.tsx';
+const approvalsSource=readFileSync(join(root,approvalsFile),'utf8');
+const approvalRegressions=[
+ '<span className="badge">Approvals</span>',
+ '<option value="all">All</option>',
+ '<option value="all">All channels</option>',
+ '<option value="newest">Newest</option>',
+ '<option value="due">Due soon</option>',
+ 'Reviewer: {selected.reviewer}',
+ '>Related Studio draft</Link>',
+ '>Related Calendar item</Link>',
+ '>Platform preview</b>',
+ '>No actions yet.</p>',
+ 'title={!overview?.channels.telegram_connected ? \'Connect Telegram first\'',
+ '>Send via Telegram</button>',
+ '>Send via Bale</button>',
+ '<Field label="Reviewer name"',
+ '<Field label="Reviewer email"',
+ '<Field label="Reviewer phone"',
+ '<Field label="Due date"',
+ 'placeholder="Context for the reviewer"',
+ '>Delivery method<select',
+ '>Public link</option>',
+ '>Internal only</option>',
+ '>Cancel</button>',
+ 'use(params)',
+];
+for(const pattern of approvalRegressions){
+ if(approvalsSource.includes(pattern)){
+  console.error(`${approvalsFile}: approvals localization/render regression: ${pattern}`);
+  failed=true;
+ }
+}
+
+const toastFile='components/ui/toast.tsx';
+const toastSource=readFileSync(join(root,toastFile),'utf8');
+if(toastSource.includes('bg-slate-950/90')){
+ console.error(`${toastFile}: mobile toast must not regress to the unreadable black treatment`);
+ failed=true;
+}
+
 if(failed)process.exit(1);
 console.log(`Visible localization checks passed across ${sourceFiles.length} source files.`);
