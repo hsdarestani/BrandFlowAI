@@ -1,0 +1,25 @@
+{
+  "appId": "de.aplussolution.smarbiz",
+  "appName": "Smarbiz",
+  "webDir": "www",
+  "loggingBehavior": "none",
+  "backgroundColor": "#f5f7fb",
+  "zoomEnabled": false,
+  "server": {
+    "url": "https://smarbiz.sbs/fa/app/dashboard",
+    "cleartext": false,
+    "allowNavigation": ["smarbiz.sbs", "*.smarbiz.sbs"]
+  },
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false,
+    "backgroundColor": "#f5f7fb"
+  },
+  "ios": {
+    "preferredContentMode": "mobile",
+    "allowsLinkPreview": false,
+    "webContentsDebuggingEnabled": false,
+    "contentInset": "automatic",
+    "backgroundColor": "#f5f7fb"
+  }
+}

@@ -1,0 +1,45 @@
+name: Mobile Store Readiness
+
+on:
+  pull_request:
+    paths:
+      - 'apps/mobile/**'
+      - 'apps/web/app/[locale]/privacy/**'
+      - 'apps/web/app/[locale]/support/**'
+      - 'apps/web/app/[locale]/account-deletion/**'
+      - 'apps/web/components/store-legal-pages.tsx'
+      - 'apps/web/components/account-deletion-request.tsx'
+      - 'apps/web/app/[locale]/app/settings/page.tsx'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/mobile/**'
+      - 'apps/web/app/[locale]/privacy/**'
+      - 'apps/web/app/[locale]/support/**'
+      - 'apps/web/app/[locale]/account-deletion/**'
+      - 'apps/web/components/store-legal-pages.tsx'
+      - 'apps/web/components/account-deletion-request.tsx'
+      - 'apps/web/app/[locale]/app/settings/page.tsx'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install mobile dependencies
+        working-directory: apps/mobile
+        run: npm install
+      - name: Validate store-facing native shell
+        working-directory: apps/mobile
+        env:
+          SMARBIZ_SKIP_LIVE: '1'
+        run: |
+          npm run store:check
+          python -m py_compile scripts/configure_android_release.py scripts/configure_android_signing.py scripts/store_positioning_check.py
+          node -e "const c=require('./capacitor.config.json'); if(c.appId!=='de.aplussolution.smarbiz') process.exit(2); console.log(c.appId,c.server.url)"

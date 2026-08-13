@@ -10,3 +10,7 @@ brandflow.db
 smarbiz.db
 *.sqlite
 *.sqlite3
+apps/mobile/android/
+apps/mobile/ios/
+apps/mobile/artifacts/
+apps/mobile/build/
