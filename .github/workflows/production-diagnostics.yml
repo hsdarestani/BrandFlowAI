@@ -1,0 +1,110 @@
+name: Production Diagnostics
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: smarbiz-production-diagnostics
+  cancel-in-progress: true
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install SSH password client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
+      - name: Collect production diagnostics
+        id: collect
+        continue-on-error: true
+        env:
+          SSHPASS: ${{ secrets.PASS }}
+        run: |
+          set +e
+          test -n "$SSHPASS" || { echo "GitHub secret PASS is missing" > /tmp/smarbiz-diagnostics.txt; exit 1; }
+          sshpass -e ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@91.107.157.75 'bash -s' > /tmp/smarbiz-diagnostics.txt 2>&1 <<'REMOTE'
+          set +e
+          echo "=== timestamp ==="
+          date -u
+          echo
+          echo "=== host ==="
+          uptime
+          df -h
+          free -m
+          echo
+          echo "=== services ==="
+          systemctl is-active docker nginx ssh || true
+          echo
+          echo "=== current release ==="
+          readlink -f /opt/smarbiz/current || true
+          echo
+          cd /opt/smarbiz/current || exit 0
+          echo "=== compose ps ==="
+          docker compose --env-file .env.production -f docker-compose.prod.yml ps -a || true
+          echo
+          echo "=== api state ==="
+          docker inspect smarbiz-api-1 --format '{{json .State}}' || true
+          echo
+          echo "=== api health ==="
+          docker inspect smarbiz-api-1 --format '{{json .State.Health}}' || true
+          echo
+          echo "=== api logs ==="
+          docker compose --env-file .env.production -f docker-compose.prod.yml logs --no-color --tail=350 api || true
+          echo
+          echo "=== postgres logs ==="
+          docker compose --env-file .env.production -f docker-compose.prod.yml logs --no-color --tail=120 postgres || true
+          echo
+          echo "=== nginx test ==="
+          nginx -t || true
+          echo
+          echo "=== loopback checks ==="
+          curl -sv --max-time 5 http://127.0.0.1:18000/health 2>&1 || true
+          curl -skv --max-time 5 --resolve smarbiz.sbs:443:127.0.0.1 https://smarbiz.sbs/healthz 2>&1 || true
+          REMOTE
+          STATUS=$?
+          cat /tmp/smarbiz-diagnostics.txt
+          exit $STATUS
+
+      - name: Report diagnostics
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          COLLECT_OUTCOME: ${{ steps.collect.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '[Diag] Smarbiz production diagnostics';
+            let details = 'No diagnostics were produced.';
+            try { details = fs.readFileSync('/tmp/smarbiz-diagnostics.txt', 'utf8'); } catch (_) {}
+            if (details.length > 24000) details = details.slice(-24000);
+            const body = [
+              `## Production diagnostics`,
+              '',
+              `- Commit: \`${context.sha}\``,
+              `- Collection outcome: **${process.env.COLLECT_OUTCOME || 'unknown'}**`,
+              `- Workflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              '```text',
+              details.replace(/```/g, "'''"),
+              '```',
+            ].join('\n');
+            const {data: issues} = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find(issue => issue.title === title && !issue.pull_request);
+            if (existing) {
+              await github.rest.issues.update({owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body});
+            } else {
+              await github.rest.issues.create({owner: context.repo.owner, repo: context.repo.repo, title, body});
+            }
