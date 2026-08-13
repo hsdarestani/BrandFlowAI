@@ -6,7 +6,7 @@
   "backgroundColor": "#f5f7fb",
   "zoomEnabled": false,
   "server": {
-    "url": "https://smarbiz.sbs/fa/app/dashboard",
+    "url": "https://smarbiz.sbs/de/auth/login",
     "cleartext": false,
     "allowNavigation": ["smarbiz.sbs", "*.smarbiz.sbs"]
   },
