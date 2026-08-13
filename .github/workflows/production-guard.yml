@@ -1,0 +1,246 @@
+name: Production Guard
+
+on:
+  workflow_run:
+    workflows: ["CI and Deploy"]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: smarbiz-production-guard
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install SSH password client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
+      - name: Guard production and install local watchdog
+        id: guard
+        continue-on-error: true
+        env:
+          SSHPASS: ${{ secrets.PASS }}
+          DEPLOY_CONCLUSION: ${{ github.event.workflow_run.conclusion || 'scheduled' }}
+        run: |
+          set +e
+          REPORT=/tmp/smarbiz-guard.txt
+          : > "$REPORT"
+          test -n "$SSHPASS" || { echo "GitHub secret PASS is missing" | tee -a "$REPORT"; exit 1; }
+
+          sshpass -e ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@91.107.157.75 \
+            "DEPLOY_CONCLUSION='$DEPLOY_CONCLUSION' bash -s" > "$REPORT" 2>&1 <<'REMOTE'
+          set -uo pipefail
+          BASE=/opt/smarbiz
+          SHARED="$BASE/shared"
+          mkdir -p "$SHARED"
+
+          cat > /usr/local/sbin/smarbiz-watchdog <<'WATCHDOG'
+          #!/usr/bin/env bash
+          set -uo pipefail
+          BASE=/opt/smarbiz
+          SHARED="$BASE/shared"
+          mkdir -p "$SHARED"
+          exec 9>/run/smarbiz-watchdog.lock
+          flock -n 9 || exit 0
+
+          log() {
+            printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$SHARED/watchdog.log" | logger -t smarbiz-watchdog
+          }
+
+          healthy() {
+            curl --fail --silent --show-error --max-time 4 http://127.0.0.1:18000/health >/dev/null 2>&1 \
+              && curl --fail --silent --show-error --max-time 5 http://127.0.0.1:13000/en >/dev/null 2>&1 \
+              && nginx -t >/dev/null 2>&1
+          }
+
+          compose_up() {
+            cd "$BASE/current" || return 1
+            docker compose --env-file .env.production -f docker-compose.prod.yml up -d --remove-orphans
+          }
+
+          if healthy; then
+            exit 0
+          fi
+
+          # Do not fight an active/recent deployment. The GitHub guard handles the
+          # just-completed deployment immediately; this timer is the independent backstop.
+          if [ -L "$BASE/current" ]; then
+            NOW=$(date +%s)
+            CHANGED=$(stat -c %Y "$BASE/current" 2>/dev/null || echo 0)
+            if [ $((NOW - CHANGED)) -lt 300 ]; then
+              log "Health is not ready but current release changed recently; deferring local recovery."
+              exit 0
+            fi
+          fi
+
+          log "Health check failed; attempting service restart."
+          systemctl is-active --quiet docker || systemctl restart docker || true
+          systemctl is-active --quiet nginx || systemctl restart nginx || true
+          compose_up || true
+
+          for _ in $(seq 1 12); do
+            healthy && { log "Recovered current release by restarting services."; exit 0; }
+            sleep 5
+          done
+
+          CURRENT=$(readlink -f "$BASE/current" 2>/dev/null || true)
+          LAST_GOOD=$(readlink -f "$BASE/last-good" 2>/dev/null || true)
+          if [ -n "$LAST_GOOD" ] && [ -d "$LAST_GOOD" ] && [ "$LAST_GOOD" != "$CURRENT" ]; then
+            DB_REV=$(cd "$CURRENT" 2>/dev/null && docker compose --env-file .env.production -f docker-compose.prod.yml run --rm --no-deps --entrypoint alembic api current 2>/dev/null | sed -n 's/^\([0-9A-Za-z_-][0-9A-Za-z_-]*\).*/\1/p' | head -n1 || true)
+            if [ -n "$DB_REV" ] && grep -Rqs "revision = [\"']$DB_REV[\"']" "$LAST_GOOD/apps/api/alembic/versions"; then
+              log "Current release is still unhealthy; database revision $DB_REV is known by last-good release. Rolling back."
+              ln -sfn "$LAST_GOOD" "$BASE/current"
+              cd "$BASE/current" || exit 1
+              docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build --remove-orphans || true
+              systemctl restart nginx || true
+              for _ in $(seq 1 18); do
+                healthy && { log "Automatic rollback to last-good release succeeded."; exit 0; }
+                sleep 5
+              done
+            else
+              log "Automatic code rollback skipped because database revision is not proven compatible with last-good release."
+            fi
+          fi
+
+          log "Automatic recovery failed; operator attention is required."
+          exit 1
+          WATCHDOG
+          chmod 0755 /usr/local/sbin/smarbiz-watchdog
+
+          cat > /etc/systemd/system/smarbiz-watchdog.service <<'SERVICE'
+          [Unit]
+          Description=Smarbiz production health watchdog
+          After=docker.service nginx.service network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/smarbiz-watchdog
+          SERVICE
+
+          cat > /etc/systemd/system/smarbiz-watchdog.timer <<'TIMER'
+          [Unit]
+          Description=Run Smarbiz health watchdog every minute
+
+          [Timer]
+          OnBootSec=90s
+          OnUnitActiveSec=60s
+          AccuracySec=10s
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+          TIMER
+
+          systemctl daemon-reload
+          systemctl enable --now smarbiz-watchdog.timer
+
+          healthy_now() {
+            curl --fail --silent --show-error --max-time 4 http://127.0.0.1:18000/health >/dev/null 2>&1 \
+              && curl --fail --silent --show-error --max-time 5 http://127.0.0.1:13000/en >/dev/null 2>&1 \
+              && nginx -t >/dev/null 2>&1
+          }
+
+          echo "=== production guard ==="
+          date -u
+          echo "Deploy conclusion: ${DEPLOY_CONCLUSION:-unknown}"
+          echo "Current: $(readlink -f "$BASE/current" 2>/dev/null || echo missing)"
+          echo "Last good: $(readlink -f "$BASE/last-good" 2>/dev/null || echo missing)"
+
+          if healthy_now; then
+            CURRENT=$(readlink -f "$BASE/current")
+            ln -sfn "$CURRENT" "$BASE/last-good"
+            echo "Production is healthy; last-good release recorded: $CURRENT"
+          else
+            echo "Production is unhealthy; invoking watchdog recovery now."
+            # The immediate GitHub guard is allowed to act even if the release was just changed.
+            touch -d '10 minutes ago' "$BASE/current" 2>/dev/null || true
+            /usr/local/sbin/smarbiz-watchdog || true
+          fi
+
+          echo "=== service state ==="
+          systemctl is-active docker nginx smarbiz-watchdog.timer || true
+          cd "$BASE/current" 2>/dev/null && docker compose --env-file .env.production -f docker-compose.prod.yml ps -a || true
+
+          if ! healthy_now; then
+            echo "Production remains unhealthy after guard recovery."
+            cd "$BASE/current" 2>/dev/null && docker compose --env-file .env.production -f docker-compose.prod.yml logs --no-color --tail=180 api web postgres || true
+            exit 1
+          fi
+
+          echo "Loopback API, web, Nginx, and local watchdog are healthy."
+          REMOTE
+          SSH_STATUS=$?
+
+          cat "$REPORT"
+          if [ "$SSH_STATUS" -ne 0 ]; then
+            exit "$SSH_STATUS"
+          fi
+
+          echo "=== public checks ===" | tee -a "$REPORT"
+          PUBLIC_OK=1
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors --max-time 20 https://smarbiz.sbs/healthz | tee -a "$REPORT" || PUBLIC_OK=0
+          echo | tee -a "$REPORT"
+          API_RESPONSE="$(curl --fail --silent --show-error --location --retry 3 --retry-all-errors --max-time 20 https://smarbiz.sbs/api/health 2>>"$REPORT")" || PUBLIC_OK=0
+          echo "$API_RESPONSE" | tee -a "$REPORT"
+          echo "$API_RESPONSE" | grep -q '"ok"[[:space:]]*:[[:space:]]*true' || PUBLIC_OK=0
+          STATUS="$(curl --silent --show-error --location --retry 3 --retry-all-errors --max-time 20 --output /tmp/smarbiz-home.html --write-out '%{http_code}' https://smarbiz.sbs/en 2>>"$REPORT")" || PUBLIC_OK=0
+          echo "Landing HTTP status: $STATUS" | tee -a "$REPORT"
+          [ "$STATUS" = "200" ] || PUBLIC_OK=0
+          grep -qi 'Smarbiz' /tmp/smarbiz-home.html 2>/dev/null || PUBLIC_OK=0
+
+          if [ "$PUBLIC_OK" != "1" ]; then
+            echo "Public verification failed after local recovery." | tee -a "$REPORT"
+            exit 1
+          fi
+          echo "Public production verification passed." | tee -a "$REPORT"
+
+      - name: Report guard status
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          GUARD_OUTCOME: ${{ steps.guard.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '[Guard] Smarbiz production recovery';
+            const success = process.env.GUARD_OUTCOME === 'success';
+            let details = 'No guard output was produced.';
+            try { details = fs.readFileSync('/tmp/smarbiz-guard.txt', 'utf8').trim(); } catch (_) {}
+            if (details.length > 12000) details = details.slice(-12000);
+            const body = [
+              `## ${success ? '✅ Production healthy' : '❌ Recovery required'}`,
+              '',
+              `- Commit: \`${context.sha}\``,
+              `- Guard outcome: **${process.env.GUARD_OUTCOME || 'unknown'}**`,
+              `- Workflow: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              '<details><summary>Guard details</summary>',
+              '',
+              '```text',
+              details.replace(/```/g, "'''"),
+              '```',
+              '</details>',
+            ].join('\n');
+            const {data: issues} = await github.rest.issues.listForRepo({owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 100});
+            const existing = issues.find(issue => issue.title === title && !issue.pull_request);
+            if (existing) {
+              await github.rest.issues.update({owner: context.repo.owner, repo: context.repo.repo, issue_number: existing.number, body});
+            } else {
+              await github.rest.issues.create({owner: context.repo.owner, repo: context.repo.repo, title, body});
+            }
+
+      - name: Fail if guard could not verify production
+        if: steps.guard.outcome != 'success'
+        run: exit 1
