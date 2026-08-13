@@ -1,7 +1,9 @@
 {
   "scripts": {
     "dev": "next dev -H 0.0.0.0",
+    "prebuild": "node scripts/check-visible-strings.mjs",
     "build": "next build",
+    "postbuild": "node scripts/smoke-render.mjs",
     "lint": "tsc --noEmit",
     "check:i18n": "node scripts/check-visible-strings.mjs",
     "test:e2e": "playwright test",
