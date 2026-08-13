@@ -1,9 +1,11 @@
 import {spawn} from 'node:child_process';
+import {createRequire} from 'node:module';
 import {setTimeout as sleep} from 'node:timers/promises';
 
+const require=createRequire(import.meta.url);
 const port=3100;
 const base=`http://127.0.0.1:${port}`;
-const nextBin='node_modules/next/dist/bin/next';
+const nextBin=require.resolve('next/dist/bin/next');
 let output='';
 
 const server=spawn(process.execPath,[nextBin,'start','-p',String(port)],{
@@ -19,9 +21,18 @@ let stopped=false;
 server.on('exit',()=>{stopped=true;});
 
 async function stop(){
-  if(!stopped){
-    server.kill('SIGTERM');
-    await Promise.race([new Promise(resolve=>server.once('exit',resolve)),sleep(3000)]);
+  if(stopped)return;
+  server.kill('SIGTERM');
+  const exited=await Promise.race([
+    new Promise(resolve=>server.once('exit',()=>resolve(true))),
+    sleep(3000).then(()=>false),
+  ]);
+  if(!exited&&!stopped){
+    server.kill('SIGKILL');
+    await Promise.race([
+      new Promise(resolve=>server.once('exit',resolve)),
+      sleep(2000),
+    ]);
   }
 }
 
