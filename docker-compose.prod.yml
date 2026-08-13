@@ -71,6 +71,18 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "from app.tasks import celery_app; import socket; replies = celery_app.control.ping(destination=[f'smarbiz-worker@{socket.gethostname()}'], timeout=3); assert replies",
+        ]
+      interval: 30s
+      timeout: 8s
+      start_period: 30s
+      retries: 3
     security_opt:
       - no-new-privileges:true
     networks: [smarbiz]
@@ -91,6 +103,18 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "cmdline = open('/proc/1/cmdline', 'rb').read(); assert b'scheduler.py' in cmdline",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     security_opt:
       - no-new-privileges:true
     networks: [smarbiz]
