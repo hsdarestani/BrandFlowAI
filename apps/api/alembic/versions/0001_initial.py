@@ -2,12 +2,15 @@
 
 Revision ID: 0001
 Revises:
+
+This revision must remain immutable. It intentionally uses the frozen schema
+snapshot from the moment production migrations were introduced instead of the
+live application model registry.
 """
 
 from alembic import op
 
-from app.database import Base
-from app import models  # noqa: F401 - register mapped models
+from app.initial_schema_v0001 import InitialBase
 
 revision = "0001"
 down_revision = None
@@ -16,8 +19,8 @@ depends_on = None
 
 
 def upgrade() -> None:
-    Base.metadata.create_all(bind=op.get_bind())
+    InitialBase.metadata.create_all(bind=op.get_bind())
 
 
 def downgrade() -> None:
-    Base.metadata.drop_all(bind=op.get_bind())
+    InitialBase.metadata.drop_all(bind=op.get_bind())
