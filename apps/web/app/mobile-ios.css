@@ -1,0 +1,105 @@
+/*
+ * Mobile/iOS hardening for the App Store build.
+ *
+ * iOS WebViews automatically zoom focused form controls below 16px. The
+ * onboarding form previously used Tailwind's text-sm (14px), which could leave
+ * the page zoomed and make controls appear cropped/crowded after typing.
+ *
+ * The onboarding chat is also constrained to the dynamic viewport so only the
+ * conversation pane scrolls while the header and primary actions remain
+ * visible. Safe-area insets keep controls clear of the iPhone status/home areas.
+ */
+
+@media (max-width: 767px) {
+  html,
+  body {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: clip;
+  }
+
+  input.field,
+  textarea.field,
+  select.field {
+    font-size: 16px;
+    line-height: 1.5;
+  }
+
+  textarea.field {
+    min-height: 112px;
+  }
+
+  .btn,
+  .chip {
+    min-height: 44px;
+  }
+
+  .activation-step {
+    min-height: 52px;
+  }
+
+  /* OnboardingChat root only. */
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) {
+    height: 100dvh;
+    min-height: 100dvh;
+    overflow: hidden;
+    padding-top: max(0.75rem, env(safe-area-inset-top));
+    padding-right: max(0.75rem, env(safe-area-inset-right));
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+    padding-left: max(0.75rem, env(safe-area-inset-left));
+  }
+
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col {
+    width: 100%;
+    max-width: 100%;
+    height: 100%;
+    min-height: 0;
+  }
+
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col > header,
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col > footer {
+    flex: 0 0 auto;
+  }
+
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col > section {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* Let the title/subtitle shrink instead of pushing the language switcher out. */
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) header > div:first-child > .min-w-0 {
+    flex: 1 1 auto;
+  }
+
+  /* Fixed avatar + percentage bubble widths can exceed narrow flex rows. */
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) section .animate-enter.flex.items-start > div {
+    min-width: 0;
+    max-width: calc(100% - 3rem) !important;
+    overflow-wrap: anywhere;
+  }
+
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) section .opacity-75 .flex.items-start > div {
+    min-width: 0;
+    max-width: calc(100% - 2.75rem) !important;
+    overflow-wrap: anywhere;
+  }
+
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) section .ms-auto {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+}
+
+@media (max-width: 380px) {
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col > header,
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col > section,
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col > footer {
+    padding: 0.75rem;
+  }
+
+  .language-option {
+    min-width: 38px;
+  }
+}
