@@ -1,4 +1,5 @@
 import '../globals.css';
+import '../mobile-ios.css';
 import {Inter,Vazirmatn} from 'next/font/google';
 import {dir,isLocale,getLocaleFontClass} from '@/lib/i18n';
 
@@ -10,6 +11,13 @@ export const metadata={
  description:'Smarbiz runs your content workflow across planning, creation, approvals, publishing, and learning.',
  metadataBase:new URL('https://smarbiz.sbs'),
  openGraph:{title:'Smarbiz',description:'Plan faster, create smarter, approve clearly, publish safely.',url:'https://smarbiz.sbs',siteName:'Smarbiz'}
+};
+
+export const viewport={
+ width:'device-width',
+ initialScale:1,
+ viewportFit:'cover',
+ themeColor:'#f5f7fb'
 };
 
 export default async function LocaleLayout({children,params}:{children:React.ReactNode;params:Promise<{locale:string}>}){
