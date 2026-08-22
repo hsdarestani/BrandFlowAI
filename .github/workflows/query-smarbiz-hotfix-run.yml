@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Manual refresh marker: 2
+          # Manual refresh marker: 3
           mkdir -p status
           curl --fail --silent --show-error -L \
             -H "Accept: application/vnd.github+json" \
