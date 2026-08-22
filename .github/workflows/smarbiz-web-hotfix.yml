@@ -1,0 +1,174 @@
+name: Deploy Smarbiz Web Security + iPad Hotfix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/**'
+      - '.github/workflows/smarbiz-web-hotfix.yml'
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: smarbiz-web-hotfix-production
+  cancel-in-progress: true
+
+jobs:
+  deploy-web:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Verify patched web build in CI
+        working-directory: apps/web
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install
+          test "$(node -p "require('next/package.json').version")" = '15.5.21'
+          node -e "const r=require('react/package.json').version;if(r!=='19.1.2')process.exit(1)"
+          npm run lint
+          npm run build
+          grep -q '@media (max-width: 1180px)' app/mobile-ios.css
+          grep -q 'font-size: 16px' app/mobile-ios.css
+
+      - name: Install SSH client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass >/dev/null
+
+      - name: Package release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='*.db' -czf /tmp/smarbiz-web-hotfix.tar.gz .
+
+      - name: Upload release
+        env:
+          SSHPASS: ${{ secrets.PASS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSHPASS" || (echo 'PASS secret is missing' && exit 1)
+          sshpass -e scp -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new \
+            /tmp/smarbiz-web-hotfix.tar.gz root@91.107.157.75:/tmp/smarbiz-web-hotfix.tar.gz
+
+      - name: Rebuild only the clean patched web container
+        env:
+          SSHPASS: ${{ secrets.PASS }}
+          RELEASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sshpass -e ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new root@91.107.157.75 \
+            "RELEASE_SHA='$RELEASE_SHA' bash -s" <<'REMOTE'
+          set -euo pipefail
+          BASE=/opt/smarbiz
+          RELEASE="$BASE/releases/$RELEASE_SHA"
+          SHARED="$BASE/shared"
+          PREVIOUS_CURRENT="$(readlink -f "$BASE/current" 2>/dev/null || true)"
+          OLD_IMAGE="$(docker inspect -f '{{.Image}}' smarbiz-web-1 2>/dev/null || true)"
+
+          mkdir -p "$RELEASE" "$SHARED"
+          rm -rf "$RELEASE"/*
+          tar -xzf /tmp/smarbiz-web-hotfix.tar.gz -C "$RELEASE"
+          rm -f /tmp/smarbiz-web-hotfix.tar.gz
+          test -f "$SHARED/.env.production"
+          ln -sfn "$SHARED/.env.production" "$RELEASE/.env.production"
+
+          cd "$RELEASE"
+          export COMPOSE_BAKE=false
+          docker compose --env-file .env.production -f docker-compose.prod.yml build web
+          docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-deps --force-recreate web
+
+          READY=0
+          for attempt in $(seq 1 40); do
+            if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:13000/de/onboarding >/tmp/smarbiz-onboarding.html 2>/dev/null; then
+              READY=1
+              break
+            fi
+            sleep 3
+          done
+
+          if [ "$READY" != 1 ]; then
+            echo 'Patched web container did not become healthy; restoring previous image.'
+            docker compose --env-file .env.production -f docker-compose.prod.yml logs --no-color --tail=200 web || true
+            if [ -n "$OLD_IMAGE" ]; then
+              docker tag "$OLD_IMAGE" smarbiz-web:latest
+              if [ -n "$PREVIOUS_CURRENT" ] && [ -d "$PREVIOUS_CURRENT" ]; then
+                cd "$PREVIOUS_CURRENT"
+                docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-deps --force-recreate --no-build web || true
+              fi
+            fi
+            exit 1
+          fi
+
+          NEXT_VERSION="$(docker exec smarbiz-web-1 node -p "require('next/package.json').version")"
+          REACT_VERSION="$(docker exec smarbiz-web-1 node -p "require('react/package.json').version")"
+          WEB_UID="$(docker exec smarbiz-web-1 id -u)"
+          echo "next_version=$NEXT_VERSION"
+          echo "react_version=$REACT_VERSION"
+          echo "web_uid=$WEB_UID"
+          test "$NEXT_VERSION" = '15.5.21'
+          test "$REACT_VERSION" = '19.1.2'
+          test "$WEB_UID" != '0'
+
+          HTML="$(cat /tmp/smarbiz-onboarding.html)"
+          mapfile -t CSS_PATHS < <(printf '%s' "$HTML" | grep -oE '/_next/static/css/[^"? ]+\.css' | sort -u)
+          test "${#CSS_PATHS[@]}" -gt 0
+          COMPILED=''
+          for path in "${CSS_PATHS[@]}"; do
+            COMPILED+="$(curl --fail --silent --show-error --max-time 8 "http://127.0.0.1:13000$path")"
+          done
+          MINIFIED="$(printf '%s' "$COMPILED" | tr -d '[:space:]')"
+          printf '%s' "$MINIFIED" | grep -q '@media(max-width:1180px)'
+          printf '%s' "$MINIFIED" | grep -q 'font-size:16px'
+          printf '%s' "$MINIFIED" | grep -q 'overflow-x:hidden'
+
+          # The exploited old web container had no persistent volume. Recreating it
+          # from the patched image removes its /tmp payloads. Verify they are absent.
+          docker exec smarbiz-web-1 sh -c 'test ! -e /tmp/dashboard && test ! -e /tmp/v.json && test ! -e /app/pot'
+
+          ln -sfn "$RELEASE" "$BASE/current"
+          echo "current_release=$(basename "$(readlink -f "$BASE/current")")"
+          echo 'SMARBIZ_WEB_SECURITY_IPAD_HOTFIX=VERIFIED'
+          REMOTE
+
+      - name: Mark verified production hotfix
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          curl --fail --silent --show-error -L -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/$SHA" \
+            -d '{"state":"success","context":"smarbiz/web-hotfix-live","description":"Next.js patched; iPad layout live; clean non-root web container"}' >/dev/null
+
+      - name: Mark production hotfix failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          curl --silent --show-error -L -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/statuses/$SHA" \
+            -d '{"state":"failure","context":"smarbiz/web-hotfix-live","description":"Smarbiz web security/iPad hotfix failed production verification"}' >/dev/null || true
