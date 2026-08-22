@@ -1,10 +1,10 @@
 {
-  "id": 32578111034,
-  "run_number": 1,
-  "status": "completed",
-  "conclusion": "failure",
-  "head_sha": "b9ccba9858413409c3403ae82992e3873293900f",
-  "html_url": "https://github.com/hsdarestani/BrandFlowAI/actions/runs/32578111034",
-  "created_at": "2026-08-22T14:14:22Z",
-  "updated_at": "2026-08-22T14:14:31Z"
+  "id": 32578236335,
+  "run_number": 2,
+  "status": "in_progress",
+  "conclusion": null,
+  "head_sha": "74f47cc4b47afbf4641bfea7e7c0dfb569c6f731",
+  "html_url": "https://github.com/hsdarestani/BrandFlowAI/actions/runs/32578236335",
+  "created_at": "2026-08-22T14:16:52Z",
+  "updated_at": "2026-08-22T14:16:57Z"
 }
