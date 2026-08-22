@@ -1,0 +1,10 @@
+{
+  "id": 32578111034,
+  "run_number": 1,
+  "status": "completed",
+  "conclusion": "failure",
+  "head_sha": "b9ccba9858413409c3403ae82992e3873293900f",
+  "html_url": "https://github.com/hsdarestani/BrandFlowAI/actions/runs/32578111034",
+  "created_at": "2026-08-22T14:14:22Z",
+  "updated_at": "2026-08-22T14:14:31Z"
+}
