@@ -34,10 +34,11 @@ jobs:
         run: |
           set -euo pipefail
           npm install
-          test "$(node -p "require('next/package.json').version")" = '15.5.21'
+          test "$(node -p "require('next/package.json').version")" = '16.3.2'
           node -e "const r=require('react/package.json').version;if(r!=='19.1.2')process.exit(1)"
           npm run lint
           npm run build
+          npm audit --omit=dev --audit-level=high
           grep -q '@media (max-width: 1180px)' app/mobile-ios.css
           grep -q 'font-size: 16px' app/mobile-ios.css
 
@@ -118,7 +119,7 @@ jobs:
           echo "next_version=$NEXT_VERSION"
           echo "react_version=$REACT_VERSION"
           echo "web_uid=$WEB_UID"
-          test "$NEXT_VERSION" = '15.5.21'
+          test "$NEXT_VERSION" = '16.3.2'
           test "$REACT_VERSION" = '19.1.2'
           test "$WEB_UID" != '0'
 
@@ -153,7 +154,7 @@ jobs:
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${{ github.repository }}/statuses/$SHA" \
-            -d '{"state":"success","context":"smarbiz/web-hotfix-live","description":"Next.js patched; iPad layout live; clean non-root web container"}' >/dev/null
+            -d '{"state":"success","context":"smarbiz/web-hotfix-live","description":"Next 16.3.2 audit clean; iPad layout live; non-root web container"}' >/dev/null
 
       - name: Mark production hotfix failure
         if: failure()
