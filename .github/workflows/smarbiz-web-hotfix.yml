@@ -27,8 +27,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: apps/web/package-lock.json
 
       - name: Verify patched web build in CI
         working-directory: apps/web
@@ -136,8 +134,6 @@ jobs:
           printf '%s' "$MINIFIED" | grep -q 'font-size:16px'
           printf '%s' "$MINIFIED" | grep -q 'overflow-x:hidden'
 
-          # The exploited old web container had no persistent volume. Recreating it
-          # from the patched image removes its /tmp payloads. Verify they are absent.
           docker exec smarbiz-web-1 sh -c 'test ! -e /tmp/dashboard && test ! -e /tmp/v.json && test ! -e /app/pot'
 
           ln -sfn "$RELEASE" "$BASE/current"
