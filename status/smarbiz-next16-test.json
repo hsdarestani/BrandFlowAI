@@ -1,0 +1,15 @@
+{
+  "build_ok": true,
+  "next_version": "16.3.2",
+  "packages": [],
+  "react_dom_version": "19.1.2",
+  "react_version": "19.1.2",
+  "runtime_vulnerabilities": {
+    "critical": 0,
+    "high": 0,
+    "info": 0,
+    "low": 0,
+    "moderate": 0,
+    "total": 0
+  }
+}
