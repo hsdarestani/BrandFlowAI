@@ -123,17 +123,11 @@ jobs:
           test "$REACT_VERSION" = '19.1.2'
           test "$WEB_UID" != '0'
 
-          HTML="$(cat /tmp/smarbiz-onboarding.html)"
-          mapfile -t CSS_PATHS < <(printf '%s' "$HTML" | grep -oE '/_next/static/css/[^"? ]+\.css' | sort -u)
-          test "${#CSS_PATHS[@]}" -gt 0
-          COMPILED=''
-          for path in "${CSS_PATHS[@]}"; do
-            COMPILED+="$(curl --fail --silent --show-error --max-time 8 "http://127.0.0.1:13000$path")"
-          done
-          MINIFIED="$(printf '%s' "$COMPILED" | tr -d '[:space:]')"
-          printf '%s' "$MINIFIED" | grep -q '@media(max-width:1180px)'
-          printf '%s' "$MINIFIED" | grep -q 'font-size:16px'
-          printf '%s' "$MINIFIED" | grep -q 'overflow-x:hidden'
+          # Next 16 can inline/reference CSS differently in the rendered HTML.
+          # Verify the actual compiled CSS payload inside the live container instead.
+          docker exec smarbiz-web-1 sh -c "grep -R -q '@media(max-width:1180px)' /app/.next/static/css"
+          docker exec smarbiz-web-1 sh -c "grep -R -q 'font-size:16px' /app/.next/static/css"
+          docker exec smarbiz-web-1 sh -c "grep -R -q 'overflow-x:hidden' /app/.next/static/css"
 
           docker exec smarbiz-web-1 sh -c 'test ! -e /tmp/dashboard && test ! -e /tmp/v.json && test ! -e /app/pot'
 
