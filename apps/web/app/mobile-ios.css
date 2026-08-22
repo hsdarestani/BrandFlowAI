@@ -1,16 +1,14 @@
 /*
- * Mobile/iOS hardening for the App Store build.
+ * iOS / iPadOS hardening for the App Store build.
  *
- * iOS WebViews automatically zoom focused form controls below 16px. The
- * onboarding form previously used Tailwind's text-sm (14px), which could leave
- * the page zoomed and make controls appear cropped/crowded after typing.
- *
- * The onboarding chat is also constrained to the dynamic viewport so only the
- * conversation pane scrolls while the header and primary actions remain
- * visible. Safe-area insets keep controls clear of the iPhone status/home areas.
+ * App Store review uses both iPhone and iPad. WebKit can auto-zoom focused
+ * controls whose computed font size is below 16px; when that happens the page
+ * may remain visually zoomed and the right side of long controls/CTAs can look
+ * cropped. Keep form controls at 16px through the common iPad widths and make
+ * the onboarding shell explicitly shrink-safe with no horizontal overflow.
  */
 
-@media (max-width: 767px) {
+@media (max-width: 1180px) {
   html,
   body {
     width: 100%;
@@ -38,8 +36,10 @@
     min-height: 52px;
   }
 
-  /* OnboardingChat root only. */
+  /* OnboardingChat root only. Covers iPhone and iPad portrait/landscape. */
   main.min-h-screen:has(> .max-w-4xl.flex.flex-col) {
+    width: 100%;
+    max-width: 100vw;
     height: 100dvh;
     min-height: 100dvh;
     overflow: hidden;
@@ -52,8 +52,17 @@
   main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col {
     width: 100%;
     max-width: 100%;
+    min-width: 0;
     height: 100%;
     min-height: 0;
+  }
+
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col > header,
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col > section,
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col > footer {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
   }
 
   main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col > header,
@@ -63,17 +72,33 @@
 
   main.min-h-screen:has(> .max-w-4xl.flex.flex-col) > .max-w-4xl.flex.flex-col > section {
     min-height: 0;
+    overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior-y: contain;
     -webkit-overflow-scrolling: touch;
   }
 
   /* Let the title/subtitle shrink instead of pushing the language switcher out. */
-  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) header > div:first-child > .min-w-0 {
-    flex: 1 1 auto;
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) header > div:first-child {
+    min-width: 0;
   }
 
-  /* Fixed avatar + percentage bubble widths can exceed narrow flex rows. */
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) header > div:first-child > .min-w-0 {
+    flex: 1 1 0%;
+    min-width: 0;
+  }
+
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) .language-switcher {
+    flex: 0 0 auto;
+    max-width: 100%;
+  }
+
+  /* The progress row and its label must both be allowed to shrink on iPad. */
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) header .progress-track {
+    min-width: 5rem;
+  }
+
+  /* Fixed avatar + bubble widths can exceed narrow flex rows. */
   main.min-h-screen:has(> .max-w-4xl.flex.flex-col) section .animate-enter.flex.items-start > div {
     min-width: 0;
     max-width: calc(100% - 3rem) !important;
@@ -87,8 +112,43 @@
   }
 
   main.min-h-screen:has(> .max-w-4xl.flex.flex-col) section .ms-auto {
+    min-width: 0;
     overflow-wrap: anywhere;
     word-break: break-word;
+  }
+
+  /* App Review caught the long German CTA clipped on the right on iPad.
+     The same progress is already shown in the header, so hide the duplicate
+     footer counter at tablet widths and guarantee both actions stay inside. */
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) footer > div {
+    width: 100%;
+    max-width: 48rem;
+    min-width: 0;
+  }
+
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) footer > div > span.muted {
+    display: none !important;
+  }
+
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) footer .btn,
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) footer .chip {
+    min-width: 0;
+    max-width: 100%;
+    flex-shrink: 1;
+    white-space: normal;
+    text-align: center;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1180px) {
+  /* Keep enough breathing room on iPad without letting the rounded shell
+     consume the full physical edge-to-edge screen. */
+  main.min-h-screen:has(> .max-w-4xl.flex.flex-col) {
+    padding-top: max(1rem, env(safe-area-inset-top));
+    padding-right: max(1rem, env(safe-area-inset-right));
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+    padding-left: max(1rem, env(safe-area-inset-left));
   }
 }
 
